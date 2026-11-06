@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-ci-only
+          POSTGRES_DB: p5_test_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d p5_test_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      P5_TEST_DATABASE_URL: postgresql+psycopg://postgres:disposable-ci-only@127.0.0.1:5432/p5_test_ci
+      APP_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Publication safety
+        run: python scripts/check_public_tree.py --tracked
+      - name: Install verification tools
+        run: python -m pip install -r requirements-ci.txt
+      - name: Audit pinned dependencies
+        run: |
+          python -m pip_audit -r constraints.txt --no-deps --disable-pip
+          python -m pip_audit -r requirements-ci.txt
+      - name: Build source distribution and wheel
+        run: python -m build --outdir "$RUNNER_TEMP/packages"
+      - name: Install built application with declared constraints
+        run: python -m pip install -c constraints.txt "$RUNNER_TEMP"/packages/*.whl pytest
+      - name: Check dependencies and installed assets
+        run: |
+          python -m pip check
+          python scripts/check_installed_package.py
+      - name: Initialize isolated test permissions
+        env:
+          PGPASSWORD: disposable-ci-only
+        run: |
+          test "$(psql -h 127.0.0.1 -U postgres -d p5_test_ci -Atc 'SELECT current_database()')" = p5_test_ci
+          psql -h 127.0.0.1 -U postgres -d p5_test_ci -v ON_ERROR_STOP=1 -c 'CREATE ROLE p5_search_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;'
+      - name: Offline application and security tests
+        run: python -m pytest -q -m 'not postgres' --junitxml="$RUNNER_TEMP/offline.xml"
+      - name: All real PostgreSQL integration tests
+        run: |
+          python -m pytest -q -m postgres --junitxml="$RUNNER_TEMP/postgres.xml"
+          python scripts/check_test_results.py "$RUNNER_TEMP/postgres.xml" --minimum 25
+      - name: Final publication check
+        run: python scripts/check_public_tree.py --tracked

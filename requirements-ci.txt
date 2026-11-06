@@ -1,0 +1,4 @@
+# Verification tools only; runtime dependencies remain in pyproject.toml/constraints.txt.
+build==1.6.1
+pip-audit==2.10.1
+PyYAML==6.0.3

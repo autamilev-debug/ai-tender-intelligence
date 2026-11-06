@@ -146,6 +146,12 @@ def test_two_complete_mocked_pipelines_bind_actual_plan_and_correct_email(setup)
         assert row['evidence']['RUN_STARTED46']['replay_allowed'] is False
         assert len([k for k in row['evidence'] if k.startswith('DISPATCH45_')])==9
         assert row['plain'].count('БЕТА ВЕРСИЯ — ДЕМОНСТРАЦИОНЕН АНАЛИЗ')==1
+        # A completed send cannot be reserved again or redirected by another account.
+        with pytest.raises(InteractionError):
+            store.reserve_send(user,c.id,row['id'],row['mime_sha256'])
+        other=202 if user==101 else 101
+        with pytest.raises(InteractionError):
+            store.reserve_send(other,c.id,row['id'],row['mime_sha256'])
     assert [r for r,_ in emails]==['a@example.invalid','b@example.invalid']
     assert all([c['model'] for c in batch]==['gpt-6.1-sol']*8+['gpt-6.1-terra'] for batch in calls)
     assert all(c['max_output_tokens']==100000 for batch in calls for c in batch)
@@ -292,3 +298,16 @@ def test_unvalidated_or_foreign_email_cannot_use_beta_send_authority(setup):
     with pytest.raises(InteractionError):mail.send(store,101,a.id,row['id'],message['mime_sha256'],gmail,_beta_permit=permit)
     with pytest.raises(InteractionError):permit.verify(store,202,b.id,row['id'],message['mime_sha256'])
     assert not calls and store.read(101,a.id,row['id'])['send_attempts']==0
+
+
+def test_paid_coordinator_defaults_closed_even_for_ready_registered_owner(setup):
+    db,p,store=setup;c=company(p)
+    calls=[]
+    def forbidden(*args):
+        calls.append(args)
+        raise AssertionError('Disabled paid execution reached a provider')
+    co=Coordinator(store,forbidden,forbidden,executor=Immediate())
+    try:
+        with pytest.raises(InteractionError):co.submit(101,c.id,{},'not-authorized')
+        assert not store.entries(101,c.id) and not calls
+    finally:co.close()
