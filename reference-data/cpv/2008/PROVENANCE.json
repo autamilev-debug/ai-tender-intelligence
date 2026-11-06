@@ -1,0 +1,97 @@
+{
+  "reference": "Official CPV main vocabulary 2008",
+  "retrieval_date": "2026-10-26",
+  "download_completed_local_file_mtime_utc": "2026-10-26T08:57:11.440805+00:00",
+  "mtime_is_local_capture_not_server_publication_time": true,
+  "requested_landing_url": "https://ted.europa.eu/en/simap/cpv",
+  "accessible_official_landing_url": "https://ted.europa.eu/bg/simap/cpv",
+  "official_download_url": "https://ted.europa.eu/documents/d/ted/cpv_2008_xml",
+  "documentation_url": "https://docs.ted.europa.eu/eforms/latest/reference/code-lists/cpv.html",
+  "http_status_observed": 200,
+  "content_type_observed": "application/zip",
+  "archive_bytes": 2501504,
+  "archive_sha256": "4129cbbce332c89ee7ce49b74aefa02f31848480d4c885f91cfb015191259146",
+  "members": [
+    {
+      "path": "cpv_2008_structure.css",
+      "bytes": 534,
+      "sha256": "b23af5b6d1a95517221e51ed9f8bec072e32ea85fb29637e3c9debf3d972016c",
+      "zip_crc32": "ea167592",
+      "compression_method": 9,
+      "crc_size_verified": true
+    },
+    {
+      "path": "cpv_2008.css",
+      "bytes": 298,
+      "sha256": "4cfa3b3bb1898afe76cd8a3e4fd4531f4e4f811439dc61fab21d1f8782c93387",
+      "zip_crc32": "fe0145f2",
+      "compression_method": 9,
+      "crc_size_verified": true
+    },
+    {
+      "path": "cpv_2008.dtd",
+      "bytes": 25,
+      "sha256": "6e0b1353989cfa0f96c45809adfe45431b5119531341b011bf2b99a062c3a4a9",
+      "zip_crc32": "4448a286",
+      "compression_method": 0,
+      "crc_size_verified": true
+    },
+    {
+      "path": "cpv_2008.xml",
+      "bytes": 12724811,
+      "sha256": "542fb7a8f35f5d0e377fd0ee621e78d0804705578c4c913dc90ec012310e59ff",
+      "zip_crc32": "41504f1f",
+      "compression_method": 9,
+      "crc_size_verified": true
+    },
+    {
+      "path": "code_cpv_suppl_2008.xml",
+      "bytes": 929890,
+      "sha256": "219f5a0ece39f3da73a213e41fc164cd40fb179059c965fa7ebc18f9edbee589",
+      "zip_crc32": "9fa9270f",
+      "compression_method": 9,
+      "crc_size_verified": true
+    }
+  ],
+  "local_main_xml_inspection": {
+    "root": "CPV_CODE",
+    "unique_main_codes": 9454,
+    "format": "eight-digit code plus hyphen and official check digit",
+    "bulgarian_nonempty_labels": 9454,
+    "languages": [
+      "BG",
+      "CS",
+      "DA",
+      "DE",
+      "EL",
+      "EN",
+      "ES",
+      "ET",
+      "FI",
+      "FR",
+      "GA",
+      "HU",
+      "IT",
+      "LT",
+      "LV",
+      "MT",
+      "NL",
+      "PL",
+      "PT",
+      "RO",
+      "SK",
+      "SL",
+      "SV"
+    ],
+    "explicit_parent_fields": false,
+    "xml_row_attributes": [
+      "CODE"
+    ],
+    "xml_row_children": [
+      "TEXT"
+    ],
+    "classification_quality_tested": false,
+    "database_imported": false
+  },
+  "hierarchy": "Official numeric prefix semantics, not explicit XML edges. Derived ancestor construction is proposed; require existing main-code membership; never infer check digits."
+}

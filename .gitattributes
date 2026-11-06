@@ -1,0 +1,8 @@
+* text=auto eol=lf
+# Preserve exact bytes of pinned assets and frozen migration streams.
+prompts/** -text
+reference-data/** -text
+migrations/** -text
+discovery_migrations/** -text
+document_migrations/** -text
+extraction_migrations/** -text
