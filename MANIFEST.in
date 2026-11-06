@@ -1,4 +1,5 @@
 include README.md PUBLIC_FILES.txt constraints.txt requirements-ci.txt .env.example
 include .github/workflows/ci.yml
+include Dockerfile .dockerignore
 recursive-include scripts *.py
 recursive-include tests *.py

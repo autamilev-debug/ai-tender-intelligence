@@ -67,3 +67,7 @@ jobs:
           python scripts/check_test_results.py "$RUNNER_TEMP/postgres.xml" --minimum 25
       - name: Final publication check
         run: python scripts/check_public_tree.py --tracked
+      - name: Build Docker image
+        run: docker build --tag ai-tender-intelligence:check .
+      - name: Verify isolated Docker runtime
+        run: python scripts/verify_docker.py --image ai-tender-intelligence:check
