@@ -1,7 +1,9 @@
+.dockerignore
 .env.example
 .gitattributes
 .github/workflows/ci.yml
 .gitignore
+Dockerfile
 MANIFEST.in
 PUBLIC_FILES.txt
 README.md
@@ -44,6 +46,7 @@ scripts/check_installed_package.py
 scripts/check_public_tree.py
 scripts/check_test_results.py
 scripts/start_beta.py
+scripts/verify_docker.py
 src/ai_tender_intelligence/__init__.py
 src/ai_tender_intelligence/acquisition/__init__.py
 src/ai_tender_intelligence/acquisition/http.py
@@ -87,6 +90,7 @@ src/ai_tender_intelligence/classification/prompts.py
 src/ai_tender_intelligence/classification/retrieval.py
 src/ai_tender_intelligence/classification/worker.py
 src/ai_tender_intelligence/config.py
+src/ai_tender_intelligence/container_runtime.py
 src/ai_tender_intelligence/demo41/__init__.py
 src/ai_tender_intelligence/demo41/mail.py
 src/ai_tender_intelligence/demo41/oauth42.py
@@ -171,6 +175,7 @@ src/ai_tender_intelligence/telegram/transport.py
 tests/conftest.py
 tests/helpers.py
 tests/test_beta_pipeline.py
+tests/test_container_runtime.py
 tests/test_email_policy.py
 tests/test_open_registration.py
 tests/test_registration.py

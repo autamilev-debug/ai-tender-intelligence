@@ -101,4 +101,38 @@ CI also checks the explicit publication allowlist, tracked files, credential pat
 
 For a local equivalent, install `requirements-ci.txt`, build with `python -m build`, run `python -m pip check`, and run pytest with the explicitly disposable database setting above. Use `python scripts/check_test_results.py postgres.xml --minimum 25` with pytest's PostgreSQL JUnit output to ensure integration tests were executed. `python scripts/check_public_tree.py --tracked` additionally requires the Git index to match `PUBLIC_FILES.txt` exactly after you manually stage reviewed changes.
 
+## Docker
+
+The Python 3.12 image installs constrained dependencies and the built application in a separate build stage. Its runtime runs as UID 10001 and includes PostgreSQL client libraries, migrations, prompts and the official CPV catalogue. The build context uses an explicit `.dockerignore` allowlist. No credentials or application data belong in the image.
+
+```powershell
+docker build --tag ai-tender-intelligence:local .
+docker run --rm --network none ai-tender-intelligence:local --offline-check
+python scripts/verify_docker.py --image ai-tender-intelligence:local
+```
+
+The verification script uses disposable containers and an internal-only network, checks actual HTTP liveness and graceful shutdown, initializes a separate PostgreSQL 17 database, and checks connectivity as the restricted runtime role. It never uses your existing database or service credentials. It removes only its own containers/network, including temporary PostgreSQL data. CI runs the same verification after the existing tests and security checks. Images are not pushed to a registry.
+
+Supply configuration through the container environment or an environment file stored **outside** the repository; do not put secrets in command arguments or build arguments. `DATABASE_URL` must use `postgresql+psycopg://` and a restricted runtime login. Localhost remains accepted by default. For a Docker/private-network hostname, set `P5_DATABASE_HOST` to the **exact same hostname** in the URL. Only the optional `sslmode` URL query is accepted; unrelated connection overrides remain rejected. Keep `P5_DB_SCOPE` consistent with setup.
+
+Default startup requires `DATABASE_URL` and `TELEGRAM_BOT_TOKEN`, performs read-only database readiness, and runs one Telegram process plus the existing FastAPI liveness server. It does not enable paid processing. Pass `--enable-paid-beta` explicitly to retain the existing paid-Beta behavior; that also requires `OPENAI_API_KEY`, `GMAIL_SENDER`, `GOOGLE_CLIENT_JSON_PATH` and working Desktop Gmail browser consent. Environment variables alone cannot enable paid mode.
+
+Container command modes:
+
+- `--offline-check`: installed imports/resources only; no network.
+- `--check`: read-only database/schema/permissions readiness; no Telegram/model/Gmail calls.
+- `--setup`: explicit administrator migration/catalogue setup; never run automatically at startup. Create the restricted `p5_search_runtime` role first, as above.
+- `--health-only`: liveness server only, for isolated checks; it is **not** a running bot or a demonstration of integration readiness.
+- No flags: normal bot plus liveness. Optional `--enable-paid-beta` retains existing authorization, quotas and durable no-replay controls.
+
+For normal startup, provide your external environment file to `docker run`, map the configured port and use `--stop-timeout 35`. The launcher gives children up to 25 seconds to close before force-stopping; use `docker logs` to inspect sanitized process output. There is no automatic application restart, model retry or Gmail resend. Longer active analyses can outlive this shutdown window and require manual review of durable records; an interrupted attempt must not be replayed.
+
+## Railway preparation and current blockers
+
+No Railway configuration is activated or deployed. A future deployment would use the Dockerfile's default entrypoint (append `--enable-paid-beta` only after explicit approval), one replica, `PORT` supplied by Railway, and health path `/health/live`. The server binds `0.0.0.0:$PORT`. This endpoint reports process liveness, not database/source/model/Gmail readiness; normal bot startup first checks database readiness, and unexpected child exit stops the whole container. See [Railway health-check documentation](https://docs.railway.com/deployments/healthchecks).
+
+Required future configuration: persistent PostgreSQL 17, restricted `DATABASE_URL`, exact `P5_DATABASE_HOST`, stable `P5_DB_SCOPE`, and `TELEGRAM_BOT_TOKEN`. Paid mode additionally needs the variables listed above. Keep administrator credentials separate and run schema setup explicitly before switching to the restricted role. Configure TLS through `sslmode` where required. Do not attach an ephemeral application container's filesystem as the only database storage.
+
+**Deployment blockers remain:** Gmail currently uses Desktop OAuth, a browser/loopback callback and a memory-only, expiring access grant. This is not an unattended headless authorization solution; paid startup is therefore not ready for Railway. Container restarts during analysis preserve durable reservations but do not resume work; outcomes may be uncertain and must not be retried automatically. Deployments/restarts must be scheduled while idle, with manual handling of interrupted jobs. PostgreSQL provisioning, persistence/backups, runtime secrets, explicit migration execution and platform shutdown behavior still need owner-reviewed deployment configuration. This ticket adds no recovery framework or token storage.
+
 The optional FastAPI liveness endpoint (`ai_tender_intelligence.api:create_app`, factory mode) reports process health only, not database/integration readiness. Remote deployment is separate from CI and is not performed by this workflow.

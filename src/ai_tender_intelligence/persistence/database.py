@@ -1,4 +1,4 @@
-"""Explicit local PostgreSQL configuration and short, sanitized transactions."""
+"""Explicit PostgreSQL host authorization and short, sanitized transactions."""
 
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -22,24 +22,30 @@ class PersistenceError(InteractionError):
 class DatabaseSettings:
     url: str
     scope: str = 'p5-local'
+    allowed_host: str | None = None
 
     def __post_init__(self):
         try:
             parsed = make_url(self.url)
             valid = (parsed.drivername == 'postgresql+psycopg'
-                     and parsed.host in {'localhost', '127.0.0.1', '::1'}
+                     and (parsed.host in {'localhost', '127.0.0.1', '::1'}
+                          or (bool(self.allowed_host) and parsed.host == self.allowed_host
+                              and all(c.isascii() and (c.isalnum() or c in '.-') for c in self.allowed_host)))
                      and bool(parsed.database) and bool(parsed.username)
-                     and not parsed.query and 0 < len(self.scope) <= 64
+                     and set(parsed.query) <= {'sslmode'}
+                     and parsed.query.get('sslmode','prefer') in {'disable','allow','prefer','require','verify-ca','verify-full'}
+                     and 0 < len(self.scope) <= 64
                      and all(c.isalnum() or c in '-_' for c in self.scope))
         except Exception:
             valid = False
         if not valid:
-            raise PersistenceError('Изисква се валидна локална PostgreSQL конфигурация.') from None
+            raise PersistenceError('Изисква се валидна PostgreSQL конфигурация с разрешен хост.') from None
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None):
         source = os.environ if environ is None else environ
-        return cls(source.get('DATABASE_URL', ''), source.get('P5_DB_SCOPE', 'p5-local'))
+        return cls(source.get('DATABASE_URL', ''), source.get('P5_DB_SCOPE', 'p5-local'),
+                   source.get('P5_DATABASE_HOST') or None)
 
 
 class Database:
