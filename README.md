@@ -93,4 +93,12 @@ python scripts/check_public_tree.py
 
 `PUBLIC_FILES.txt` is the explicit publication allowlist. Review that exact list before staging; `.gitignore` is only an additional defense. Runtime data, secrets, caches and local environment files are not publication candidates. No repository initialization, deployment or publishing is performed by the application.
 
-The optional FastAPI liveness endpoint (`ai_tender_intelligence.api:create_app`, factory mode) reports process health only, not database/integration readiness. CI/CD and remote deployment are intentionally separate operational work.
+## Continuous integration
+
+Pushes to `main` and pull requests targeting `main` run `.github/workflows/ci.yml` on Ubuntu with Python 3.12 and an isolated PostgreSQL 17 service. CI builds a source distribution and wheel, installs the wheel with `constraints.txt`, checks packaged resources, scans pinned dependencies with pip-audit, and runs every offline and PostgreSQL test. The integration-result check rejects skips and fewer than 25 database tests. No real Telegram, OpenAI or Gmail credentials are needed.
+
+CI also checks the explicit publication allowlist, tracked files, credential patterns and prohibited private artifacts. These checks reduce accidental disclosure; they do not guarantee that every possible secret or vulnerability can be detected. Verification tools are pinned in `requirements-ci.txt`. When updating dependencies, review both the project constraints and current advisory results; do not suppress findings without review.
+
+For a local equivalent, install `requirements-ci.txt`, build with `python -m build`, run `python -m pip check`, and run pytest with the explicitly disposable database setting above. Use `python scripts/check_test_results.py postgres.xml --minimum 25` with pytest's PostgreSQL JUnit output to ensure integration tests were executed. `python scripts/check_public_tree.py --tracked` additionally requires the Git index to match `PUBLIC_FILES.txt` exactly after you manually stage reviewed changes.
+
+The optional FastAPI liveness endpoint (`ai_tender_intelligence.api:create_app`, factory mode) reports process health only, not database/integration readiness. Remote deployment is separate from CI and is not performed by this workflow.
