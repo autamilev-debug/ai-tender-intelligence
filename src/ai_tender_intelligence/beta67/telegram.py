@@ -3,8 +3,9 @@ import re
 from dataclasses import replace
 from datetime import timedelta
 from html import escape
-from ..telegram.interaction import Interaction
+from ..telegram.interaction import Interaction, Wizard
 from ..telegram.models import InteractionError, Button
+from ..telegram.rendering import profile_review_parts
 from ..telegram.search_preview import SearchOnlyInteraction, LiveOwnerSearch, SEARCH_WAIT
 from ..analysis.sources import procedure_mapping
 from ..classification.contract import NotSent
@@ -56,6 +57,10 @@ class BetaInteraction(Interaction):
         messages=super()._menu(user,company)
         current=company or self.selected.get(user)
         if not current:return messages
+        profile = self.services.profiles.company(user, current)
+        status = self.services.profiles.classification_result(user, current)
+        can_search = profile.classification == 'ready' and status != 'pending'
+        can_recover = profile.classification == 'failed' and status != 'pending'
         result=[]
         for m in messages:
             rows=[]
@@ -64,12 +69,42 @@ class BetaInteraction(Interaction):
                 for button in row:
                     a=self.actions.get(button.callback_data)
                     if a and a.name=='menu' and a.target=='2':continue
+                    if a and a.name=='menu' and a.target=='0' and not can_search:continue
                     if a and a.name=='menu' and a.target=='1':button=replace(button,text='Моите доклади')
                     buttons.append(button)
                 if buttons:rows.append(tuple(buttons))
             rows.insert(1,(self._button(user,'Моят профил','view_profile',company=current),))
-            result.append(replace(m,keyboard=tuple(rows)))
+            if can_recover:
+                rows.insert(0, self._cpv_recovery_row(user, current))
+            text = m.text + ('\n\n' + self._cpv_failure_text(status) if can_recover else '')
+            result.append(replace(m,text=text,keyboard=tuple(rows)))
         return result
+
+    def _cpv_recovery_row(self, user, company):
+        return (self._button(user, 'Редактирай дейностите', 'recover_cpv', company=company),)
+
+    @staticmethod
+    def _cpv_failure_text(status):
+        if status == 'no_supported_match':
+            return 'Не намерихме подходящи CPV кодове за описаните дейности. Уточнете какви услуги или продукти предлагате.'
+        return 'Възникна технически проблем при CPV класификацията. При нужда се свържете с организатора на Бета теста.'
+
+    def _cpv_failure_notice(self, user, company, status):
+        profile = self.services.profiles.company(user, company)
+        rows = [self._cpv_recovery_row(user, company)] if profile.classification == 'failed' and status != 'pending' else []
+        return self._message(user, self._cpv_failure_text(status), rows)
+
+    def _begin_cpv_recovery(self, user, company):
+        profile = self.services.profiles.company(user, company)
+        if profile.classification != 'failed' or self.services.profiles.classification_pending(user, company):
+            raise InteractionError('Редактирането е достъпно след приключила неуспешна класификация.')
+        self._new_context(user)
+        self.selected[user] = company
+        fields = profile.fields
+        self.wizards[user] = Wizard('cpv_recovery', 'activity', company, fields.name, fields.email,
+                                    list(fields.categories), regions=set(fields.regions), base_revision=profile.revision)
+        current = [self._message(user, part, html=html) for part, html in profile_review_parts(fields)]
+        return current + self._wizard_prompt(user)
     def _wizard_prompt(self,user,**kw):
         messages=super()._wizard_prompt(user,**kw)
         if self.wizards[user].step=='email':
@@ -92,8 +127,21 @@ class BetaInteraction(Interaction):
             return self._analyze(user,company,reference,int(match[1])-1,'telegram:'+str(self.event_ids[user]))
         return super()._text(user,text)
     def _dispatch(self,user,a):
+        if a.name == 'recover_cpv':
+            return self._begin_cpv_recovery(user, a.company)
+        wizard = self.wizards.get(user)
+        if a.name == 'confirm' and wizard and wizard.mode == 'cpv_recovery':
+            if not self.coordinator or not self.coordinator.enabled or self.coordinator.luna_factory is None:
+                raise InteractionError('Новата CPV класификация в момента не е достъпна.')
+            self.services.profiles.recover_classification(
+                user, wizard.company, wizard.fields().activities,
+                confirmation_key=wizard.id, expected_revision=wizard.base_revision)
+            self.classification_watch[(user, wizard.company)] = (self.clock.now(), False, False)
+            self.wizards.pop(user)
+            return self._close_controls(user, wizard.review_message, [
+                self._message(user, 'Дейностите са запазени. Заявихте нова CPV класификация. Ще Ви уведомим за резултата.')
+            ])
         if a.name=='view_profile':
-            from ..telegram.rendering import profile_review_parts
             fields=self.services.profiles.company(user,a.company).fields
             return [self._message(user,text,html=html) for text,html in profile_review_parts(fields)]+self._menu(user,a.company)
         if a.name=='confirm_email':
@@ -149,16 +197,26 @@ class BetaInteraction(Interaction):
                     self.coordinator.classify(user,cid);continue
                 self.classification_watch.pop((user,cid),None)
                 finished_profiles.add((user,str(cid)))
-                good=self.services.profiles.classification_result(user,cid)=='success'
-                messages.append(self._message(user,'Профилът е готов. Можете да търсите поръчки.' if good else
-                    'Обработката на дейностите не беше завършена. Свържете се с организатора на Бета теста.'))
+                status = self.services.profiles.classification_result(user, cid)
+                if status == 'success':
+                    messages.append(self._message(user,'Профилът е готов. Можете да търсите поръчки.'))
+                    messages.extend(self._menu(user, cid))
+                else:
+                    messages.append(self._cpv_failure_notice(user, cid, status))
             except InteractionError:self.classification_watch.pop((user,cid),None)
         for event in self.coordinator.drain():
             user,state=event[:2]
             if state=='CPV_FAILED':
-                self.classification_watch.pop((user,event[2]),None)
-                if (user,event[2]) not in finished_profiles:
-                    messages.append(self._message(user,'Обработката на дейностите не беше завършена. Свържете се с организатора на Бета теста.'))
+                company, intent_id = event[2:]
+                try:
+                    status = self.services.profiles.classification_result(user, company, intent_id=intent_id)
+                    if status == 'stale':
+                        continue  # An old completion event cannot discard a new recovery watch.
+                    self.classification_watch.pop((user, company), None)
+                    if (user, company) not in finished_profiles:
+                        messages.append(self._cpv_failure_notice(user, company, status))
+                except InteractionError:
+                    self.classification_watch.pop((user, company), None)
             if state in {'PROCESSING','COMPLETED','FAILED'}:
                 messages.append(self._message(user,getattr(service,state)))
         return messages

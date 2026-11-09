@@ -180,7 +180,7 @@ class Interaction:
         w = self.wizards[user]
         old = w.selection_message or w.review_message
         if w.step == "review":
-            w.step = "activity" if w.mode == "categories" else "regions"
+            w.step = "activity" if w.mode in {"categories", "cpv_recovery"} else "regions"
             if w.step == "activity":
                 w.activities.pop(w.categories[-1], None)
         elif w.step == "regions" and w.mode == "new":
@@ -189,6 +189,8 @@ class Interaction:
         elif w.step == "activity":
             if w.activities:
                 w.activities.pop(next(reversed(w.activities)))
+            elif w.mode == "cpv_recovery":
+                return self._leave(user, w.company)
             else:
                 w.step = "categories"
         elif w.step in {"categories", "email"} and w.mode == "new":
@@ -319,8 +321,12 @@ class Interaction:
             return selector("📍 Изберете райони.\n\nПразен избор = цяла България.", rows)
         if w.step == "review":
             parts = profile_review_parts(w.fields())
+            confirmation = "Потвърди"
+            if w.mode == "cpv_recovery":
+                parts += (("Потвърждението заявява една нова платена CPV класификация за показаните дейности.", False),)
+                confirmation = "Потвърди нова класификация"
             messages = [self._message(user, part,
-                                  [[btn("Потвърди", "confirm"), btn("Отказ", "cancel"), btn("Назад", "wizard_back")]] if i == len(parts) - 1 else [], html=html)
+                                  [[btn(confirmation, "confirm"), btn("Отказ", "cancel"), btn("Назад", "wizard_back")]] if i == len(parts) - 1 else [], html=html)
                     for i, (part, html) in enumerate(parts)]
             w.review_message = messages[-1].id
             return messages
@@ -360,7 +366,7 @@ class Interaction:
             category = next(c for c in w.categories if c not in w.activities)
             w.activities[category] = self._valid_text(text, 2000)
             if len(w.activities) == len(w.categories):
-                w.step = "review" if w.mode == "categories" else "regions"
+                w.step = "review" if w.mode in {"categories", "cpv_recovery"} else "regions"
         else:
             raise InteractionError("Използвайте бутоните от текущата стъпка.")
         return self._wizard_prompt(user)

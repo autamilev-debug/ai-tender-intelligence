@@ -262,14 +262,25 @@ class PostgresProfiles:
             row = self._company(s,owner,company)
             return self._pending(s,row['id']) is not None
 
-    def classification_result(self, user, company):
+    def classification_result(self, user, company, *, intent_id=None):
         with self.db.transaction() as s:
             owner = self._owner(s,user); row = self._company(s,owner,company)
+            latest = self._latest_classification(s, row['id'])
+            if intent_id is not None and (not latest or str(latest.id) != str(intent_id)):
+                return 'stale'
             if self._pending(s,row['id']):
                 return 'pending'
-            status = s.scalar(select(intents.c.status).where(intents.c.company_id == row['id'])
-                .order_by(intents.c.created_at.desc(), intents.c.id.desc()).limit(1))
-            return 'success' if status == 'SUCCEEDED' else 'failed'
+            if latest and latest.status == 'SUCCEEDED':
+                return 'success'
+            if latest and latest.status == 'FAILED' and latest.last_error == 'NO_SUPPORTED_MATCH':
+                return 'no_supported_match'
+            return 'failed'
+
+    @staticmethod
+    def _latest_classification(s, company):
+        return s.execute(select(intents.c.id, intents.c.status, intents.c.processing_state, intents.c.last_error)
+            .where(intents.c.company_id == company)
+            .order_by(intents.c.created_at.desc(), intents.c.id.desc()).limit(1)).first()
 
     def pending_intent(self, user, company):
         with self.db.transaction() as s:
