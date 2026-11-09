@@ -26,10 +26,20 @@ def commands(args,environ):
     if missing:raise ValueError('Container startup requires '+', '.join(missing)+'.')
     bot=[sys.executable,'-m','ai_tender_intelligence.beta67','--connect']
     if args.enable_paid_beta:
-        required=('OPENAI_API_KEY','GMAIL_SENDER','GOOGLE_CLIENT_JSON_PATH')
+        from .demo41.oauth42 import OAuthFailure, RefreshGrant, oauth_mode
+        required=('OPENAI_API_KEY','GMAIL_SENDER')
         if any(not environ.get(name) for name in required):
-            raise ValueError('Paid Beta requires OPENAI_API_KEY, GMAIL_SENDER and GOOGLE_CLIENT_JSON_PATH.')
-        bot+=['--enable-paid-beta','--client-json',environ['GOOGLE_CLIENT_JSON_PATH']]
+            raise ValueError('Paid Beta requires OPENAI_API_KEY and GMAIL_SENDER.')
+        bot.append('--enable-paid-beta')
+        try:
+            if oauth_mode(environ)=='headless':
+                RefreshGrant.from_environment(environ).close()
+            elif environ.get('GOOGLE_CLIENT_JSON_PATH'):
+                bot+=['--client-json',environ['GOOGLE_CLIENT_JSON_PATH']]
+            else:
+                raise OAuthFailure('OAUTH_EXTERNAL_DESKTOP_FILE_REQUIRED')
+        except OAuthFailure as error:
+            raise ValueError('Gmail configuration failed ('+str(error)+').') from None
     return [bot,http]
 
 

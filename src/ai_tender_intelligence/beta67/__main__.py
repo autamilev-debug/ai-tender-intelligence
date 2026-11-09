@@ -2,7 +2,6 @@
 from ai_tender_intelligence.assets import root as asset_root
 import argparse
 import os
-import time
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,11 +64,15 @@ def main(argv=None):
         profiles=Profiles(db,allowed);store=BetaStore(db,allowed);clock=UTCClock()
         settings=OpenAISettings()
         if a.enable_paid_beta:
-            if not a.client_json:raise ValueError('BETA67_EXTERNAL_GMAIL_OAUTH_REQUIRED')
             mail._recipient(mail.SENDER)
             if mail.SENDER.endswith('.invalid'):raise ValueError('GMAIL_SENDER_REQUIRED')
             settings=OpenAISettings(True,os.environ.pop('OPENAI_API_KEY',None))
-            grant=oauth42.authorize(Path(a.client_json),ROOT)
+            if oauth42.oauth_mode(os.environ)=='headless':
+                grant=oauth42.RefreshGrant.from_environment()
+                grant.access_token()
+            else:
+                if not a.client_json:raise oauth42.OAuthFailure('OAUTH_EXTERNAL_DESKTOP_FILE_REQUIRED')
+                grant=oauth42.authorize(Path(a.client_json),ROOT)
         token=PreviewSettings.from_environment({'TELEGRAM_BOT_TOKEN':os.environ.pop('TELEGRAM_BOT_TOKEN',''),
                     'TELEGRAM_ALLOWED_USER_IDS':'1'}).token
         public=PublicHTTP()
@@ -91,8 +94,13 @@ def main(argv=None):
             return (RuntimeWorkflow(store,sources,RuntimeProvider(),internal_beta=True),
                     RuntimeProvider(settings=settings))
         def gmail_factory(recipient):
-            if grant is None or time.monotonic()>=grant.expires_at:raise ValueError('BETA67_GMAIL_CONSENT_EXPIRED')
-            return SenderGmail(grant.token,recipient=recipient)
+            if grant is None:raise ValueError('BETA67_GMAIL_AUTHORIZATION_REQUIRED')
+            try:
+                token=grant.access_token()
+            except oauth42.OAuthFailure as error:
+                print('Gmail authorization failed ('+str(error)+').')
+                raise
+            return SenderGmail(token,recipient=recipient)
         def luna_factory(store,requests,user,company,ident,intent):
             return LunaWorker(store,requests,user,company,ident,intent,Luna(settings))
         coordinator=Coordinator(store,flow_factory,gmail_factory,enabled=a.enable_paid_beta,luna_factory=luna_factory)
@@ -103,6 +111,9 @@ def main(argv=None):
         print('Three-account open-registration internal Beta running. One processing slot; no model/send retries. Ctrl+C stops.')
         Preview(client,ui,clock,PublicTelegramUsers(),banner='',demo_banner='').run()
         return 0
+    except oauth42.OAuthFailure as error:
+        print('Beta stopped during Gmail authorization ('+str(error)+').')
+        return 2
     except (Exception,KeyboardInterrupt) as error:
         print('Beta stopped safely ('+type(error).__name__+'). No automatic replay; inspect persisted job diagnostics.')
         return 2
