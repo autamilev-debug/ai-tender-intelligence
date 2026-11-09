@@ -208,7 +208,7 @@ def test_profile_wizard_registers_two_users_and_confirms_email_edits(setup):
     assert ui.handle(InputEvent(999,999,999,text='/start'))
     assert p.companies(101)[0].id!=p.companies(202)[0].id
 
-@pytest.mark.parametrize('outcome',['success','not_sent','uncertain'])
+@pytest.mark.parametrize('outcome',['success','not_sent','uncertain','no_match','unknown_code'])
 def test_existing_luna_contract_one_attempt_and_no_retry(setup,outcome):
     db,p,store=setup;c=company(p,ready=False)
     intent=p.pending_intent(101,c.id)
@@ -220,7 +220,13 @@ def test_existing_luna_contract_one_attempt_and_no_retry(setup,outcome):
         calls.append(req)
         if outcome=='not_sent':return httpx.Response(401,json={'error':{'type':'invalid_api_key'}})
         if outcome=='uncertain':raise httpx.ReadTimeout('synthetic')
-        return http_response(envelope(json.dumps(response(request),ensure_ascii=False)))
+        body = response(request)
+        if outcome == 'no_match':
+            body['selections'] = []
+            body['category_reviews'][0]['no_match_reason'] = 'Няма подкрепен кандидат.'
+        elif outcome == 'unknown_code':
+            body['selections'][0]['identifier'] = '99999999-9'
+        return http_response(envelope(json.dumps(body,ensure_ascii=False)))
     provider=Luna(OpenAISettings(True,'mock-only'),transport=httpx.MockTransport(handle))
     worker=LunaWorker(store,Requests(store),101,c.id,ident,intent.id,provider)
     result=worker.run_once()
@@ -234,6 +240,15 @@ def test_existing_luna_contract_one_attempt_and_no_retry(setup,outcome):
     assert pending['processing_state']!='RETRY_WAIT'
     if outcome=='success':assert result=='succeeded' and p.company(101,c.id).classification=='ready'
     if outcome=='uncertain':assert pending['processing_state']=='UNCERTAIN'
+    if outcome in {'no_match', 'unknown_code'}:
+        expected = 'NO_SUPPORTED_MATCH' if outcome == 'no_match' else 'CODE_NOT_FOUND'
+        assert result == 'failed' and rows[0]['status'] == 'SUCCEEDED'
+        assert pending['status'] == 'FAILED' and pending['processing_state'] == 'FINISHED'
+        assert pending['last_error'] == expected and pending['dispatch_count'] == 1
+        assert pending['result_checkpoint'] is None
+        failed = p.company(101, c.id)
+        assert failed.classification == 'failed' and not failed.cpv
+        assert p.pending_intent(101, c.id) is None
 
 def test_recipient_change_after_preparation_stops_send_without_rerouting(setup):
     db,p,store=setup;c=company(p)
