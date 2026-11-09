@@ -1,6 +1,7 @@
 """Actual task-owned disposable PostgreSQL; all AI/source/Gmail HTTP is mocked."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Barrier
 from types import SimpleNamespace
 from uuid import UUID,uuid4
 from email.parser import BytesParser
@@ -249,6 +250,173 @@ def test_existing_luna_contract_one_attempt_and_no_retry(setup,outcome):
         failed = p.company(101, c.id)
         assert failed.classification == 'failed' and not failed.cpv
         assert p.pending_intent(101, c.id) is None
+
+@pytest.mark.parametrize(('initial_failure', 'message'), [
+    ('NO_SUPPORTED_MATCH', 'Не намерихме подходящи CPV кодове'),
+    ('INVALID_RESPONSE', 'Възникна технически проблем'),
+])
+def test_failed_cpv_profile_recovers_only_after_telegram_confirmation(setup, initial_failure, message):
+    db, profiles, store = setup
+    profiles.register(101)
+    profiles.register(202)
+    profiles.register(303)
+    fields = replace(FIELDS, regions=frozenset({'Варна'}))
+    profile = profiles.create_company(101, fields, confirmation_key='initial')
+    old_intent = profiles.pending_intent(101, profile.id)
+    calls = []
+
+    def handle(request):
+        body = response(SimpleNamespace(**json.loads(json.loads(request.content)['input'])))
+        calls.append(body)
+        if len(calls) == 1:
+            if initial_failure == 'INVALID_RESPONSE':
+                return http_response(envelope('{'))
+            body['selections'] = []
+            for review in body['category_reviews']:
+                review['no_match_reason'] = 'Не е намерен подходящ кандидат.'
+        return http_response(envelope(json.dumps(body, ensure_ascii=False)))
+
+    def luna(store, ledger, user, company_id, request_id, intent_id):
+        provider = Luna(OpenAISettings(True, 'mock-only'), transport=httpx.MockTransport(handle))
+        return LunaWorker(store, ledger, user, company_id, request_id, intent_id, provider)
+
+    searches = []
+    def execute(user, company_id, limits, *, request_key, before_fetch):
+        searches.append((user, company_id))
+        return SimpleNamespace(id='synthetic-search')
+
+    search = Search(SimpleNamespace(execute=execute, read=lambda *args: SimpleNamespace(id='synthetic-search')),
+                    profiles, profiles.allowed_users, lambda: None)
+    co = Coordinator(store, None, None, enabled=True, luna_factory=luna, executor=Immediate())
+    ui = BetaInteraction(SimpleNamespace(profiles=profiles, classifications=profiles, search=search),
+                         ManualClock(), {101, 202, 303}, coordinator=co)
+    sequence = 0
+    def event(user=101, *, text=None, callback=None):
+        nonlocal sequence
+        sequence += 1
+        return ui.handle(InputEvent(user, user, sequence, text=text, callback=callback))
+
+    def button(messages, label):
+        return next(b.callback_data for m in messages for row in m.keyboard for b in row
+                    if canonical_label(b.text) == canonical_label(label))
+
+    def history(intent):
+        with db.transaction() as session:
+            job = dict(session.execute(select(intents).where(intents.c.id == UUID(intent))).mappings().one())
+            attempt = dict(session.execute(select(attempts).where(attempts.c.intent_id == UUID(intent))).mappings().one())
+            reservation = dict(session.execute(select(schema.requests).where(
+                schema.requests.c.intent == UUID(intent))).mappings().one())
+            return job, attempt, reservation
+
+    event(text='/start')
+    assert not calls
+    failed = ui.poll()
+    assert len(failed) == 1 and message in failed[0].text
+    assert ui.poll() == [] and len(calls) == 1
+    old_history = history(old_intent.id)
+    assert old_history[0]['status'] == 'FAILED' and old_history[0]['last_error'] == initial_failure
+    assert old_history[2]['state'] == 'FAILED'
+    with pytest.raises(InteractionError):
+        search.start_search(101, profile.id, 'before-recovery')
+    assert not searches
+    menu = event(text='/start')
+    assert message in menu[0].text
+    assert all(canonical_label(b.text) != canonical_label('Търси поръчки')
+               for m in menu for row in m.keyboard for b in row)
+    edit_button = button(menu, 'Редактирай дейностите')
+    for other in (202, 303):
+        assert 'невалидно' in event(other, callback=edit_button)[0].text
+        assert other not in ui.wizards
+    edit = event(callback=edit_button)
+    assert fields.activities[0][1] in ''.join(m.text for m in edit)
+    changed = 'Ремонт на покривни конструкции'
+    review = event(text=changed)
+    confirm = button(review, 'Потвърди нова класификация')
+    assert changed in ''.join(m.text for m in review)
+    assert 'една нова платена CPV класификация' in review[-1].text
+    assert profiles.company(101, profile.id).fields == fields
+    assert profiles.pending_intent(101, profile.id) is None
+    assert ui.poll() == [] and len(calls) == 1
+    for other in (202, 303):
+        assert 'невалидно' in event(other, callback=confirm)[0].text
+
+    assert 'Дейностите са запазени' in ''.join(m.text for m in event(callback=confirm))
+    pending = profiles.pending_intent(101, profile.id)
+    assert pending.id != old_intent.id and pending.categories == (('Строителство', changed),)
+    assert event(callback=confirm) == []
+    assert len(calls) == 1
+    with pytest.raises(InteractionError):
+        search.start_search(101, profile.id, 'pending-recovery')
+    # A delayed completion event from the original intent must not affect the new one.
+    co.events.put((101, 'CPV_FAILED', profile.id, old_intent.id))
+    assert ui.poll() == [] and len(calls) == 2
+    ready = ui.poll()
+    assert 'Профилът е готов' in ready[0].text and button(ready, 'Търси поръчки')
+    assert ui.poll() == [] and not co.classify(101, profile.id) and len(calls) == 2
+    recovered = profiles.company(101, profile.id)
+    assert recovered.id == profile.id and recovered.owner == profile.owner
+    assert recovered.classification == 'ready' and recovered.cpv
+    assert recovered.fields == replace(fields, activities=(('Строителство', changed),))
+    search.start_search(101, profile.id, 'after-recovery')
+    assert searches == [(101, profile.id)]
+    assert history(old_intent.id) == old_history
+    job, attempt, reservation = history(pending.id)
+    assert job['dispatch_count'] == 1 and attempt['number'] == 1
+    assert (job['status'], attempt['status'], reservation['state']) == ('SUCCEEDED', 'SUCCEEDED', 'DONE')
+
+
+def test_cpv_recovery_serializes_confirmations_across_three_users(setup):
+    db, profiles, store = setup
+    accounts = {user: company(profiles, user, ready=False) for user in (101, 202, 303)}
+    for user, profile in accounts.items():
+        pending = profiles.pending_intent(user, profile.id)
+        profiles.fail_classification(user, profile.id, pending.id)
+    activities = (('Строителство', 'Подмяна на керемиди'),)
+    first = accounts[101]
+    with pytest.raises(InteractionError):
+        profiles.recover_classification(101, first.id, first.fields.activities,
+                                        confirmation_key='unchanged', expected_revision=first.revision)
+    with pytest.raises(InteractionError):
+        profiles.recover_classification(202, first.id, activities, confirmation_key='foreign',
+                                        expected_revision=first.revision)
+
+    def confirm(user, key='confirmed'):
+        profile = accounts[user]
+        return profiles.recover_classification(user, profile.id, activities,
+                                               confirmation_key=key, expected_revision=profile.revision)
+
+    barrier = Barrier(3, timeout=10)
+    def race(user):
+        barrier.wait()
+        try:
+            return confirm(user)
+        except InteractionError as exc:
+            assert 'Изчакайте текущата CPV класификация' in str(exc)
+            return None
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        winners = [(u, intent) for u, intent in zip(accounts, pool.map(race, accounts)) if intent]
+    assert len(winners) == 1
+    winner, intent = winners[0]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(confirm, (winner, winner))) == [intent, intent]
+    waiting = next(user for user in accounts if user != winner)
+    with pytest.raises(InteractionError, match='Изчакайте текущата CPV класификация'):
+        confirm(waiting)
+    assert profiles.pending_intent(waiting, accounts[waiting].id) is None
+    # Cover the interval after the worker finalizes the intent, before releasing its Beta slot.
+    ledger = Requests(store)
+    reservation = ledger.reserve(winner, accounts[winner].id, 'intent:' + intent, intent=intent)
+    profiles.fail_classification(winner, accounts[winner].id, intent)
+    with pytest.raises(InteractionError, match='Изчакайте текущата CPV класификация'):
+        confirm(waiting)
+    ledger.finish(winner, accounts[winner].id, reservation, False, {'kind': 'CPV'})
+    assert confirm(waiting) != intent
+    with db.transaction() as session:
+        assert session.scalar(select(func.count()).select_from(users)) == 3
+        assert session.scalar(select(func.count()).select_from(schema.requests)
+                              .where(schema.requests.c.kind == 'ANALYSIS')) == 0
+
 
 def test_recipient_change_after_preparation_stops_send_without_rerouting(setup):
     db,p,store=setup;c=company(p)

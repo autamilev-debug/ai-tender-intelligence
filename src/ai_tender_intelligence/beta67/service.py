@@ -105,7 +105,7 @@ class Coordinator:
         except BaseException as error:diagnostic['error_type']=type(error).__name__
         finally:
             try:self.requests.finish(user,company,ident,ok,diagnostic)
-            finally:self.events.put((user,'CPV_FINISHED' if ok else 'CPV_FAILED',str(company)))
+            finally:self.events.put((user,'CPV_FINISHED' if ok else 'CPV_FAILED',str(company),str(intent)))
     def drain(self):
         result=[]
         while True:

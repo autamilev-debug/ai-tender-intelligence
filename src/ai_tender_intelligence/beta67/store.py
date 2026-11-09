@@ -1,14 +1,15 @@
 from ..persistence.identity import freeze_users
 """Invited identity, private jobs and atomic one-request-per-tester allowances."""
 from contextlib import contextmanager
+from dataclasses import replace
 from hashlib import sha256
 from uuid import uuid4, UUID
 from sqlalchemy import select, insert, update, func, text
-from ..persistence.profiles import PostgresProfiles, _email
+from ..persistence.profiles import CATEGORY_KEYS, CONFLICT, PostgresProfiles, _digest, _email, _key, _text, validate_profile
 from ..demo41.store import DemoStore
 from ..telegram.models import InteractionError
 from .schema import invites, runs, requests
-from ..persistence.schema import users
+from ..persistence.schema import companies, company_categories, intents, users
 
 DENIED='Първо се регистрирайте чрез /start.'
 CAPACITY='Бета версията е ограничена до три регистрирани акаунта. В момента няма свободни места.'
@@ -61,6 +62,59 @@ class Profiles(PostgresProfiles):
         return Access(self.db).register(user)
     def delete_company(self,*a,**kw):
         raise InteractionError('Изтриването не е включено в ограничената Бета версия.')
+
+    def recover_classification(self, user, company, activities, *, confirmation_key, expected_revision):
+        """Confirm an activity edit and create a new initial classification intent."""
+        key = _key('cpv-recovery:' + _text(confirmation_key, 115))
+        with self.db.transaction() as s:
+            owner = self._owner(s, user, lock=True)
+            row = self._company(s, owner, company, lock=True)
+            current = self._dto(s, owner, row).fields
+            edited = validate_profile(replace(current, activities=activities))
+            candidate = [{'category_key': CATEGORY_KEYS[label], 'activity': activity}
+                         for label, activity in edited.activities]
+            digest = _digest(candidate)
+            previous = s.execute(select(intents.c.id, intents.c.company_id, intents.c.input_digest)
+                .where(intents.c.owner_user_id == owner['id'], intents.c.kind == 'CPV_CLASSIFY',
+                       intents.c.request_key_hash == key)).first()
+            if previous:
+                if previous.company_id != row['id'] or previous.input_digest != digest:
+                    raise InteractionError(CONFLICT)
+                return str(previous.id)
+            if expected_revision != row['profile_revision']:
+                raise InteractionError(CONFLICT)
+            latest = self._latest_classification(s, row['id'])
+            if (row['classification_status'] != 'FAILED' or not latest
+                    or (latest.status, latest.processing_state) != ('FAILED', 'FINISHED')):
+                raise InteractionError('Редактирането е достъпно след приключила неуспешна класификация.')
+            if edited.activities == current.activities:
+                raise InteractionError('Променете поне едно описание на дейност, за да заявите нова класификация.')
+
+            # Same lock and owner-first order as the Beta worker reservation.
+            s.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': LOCK})
+            pending = s.scalar(select(intents.c.id).join(users, users.c.id == intents.c.owner_user_id)
+                .where(users.c.scope == self.db.settings.scope, intents.c.status == 'PENDING').limit(1))
+            running = s.scalar(select(requests.c.id).where(requests.c.scope == self.db.settings.scope,
+                requests.c.kind == 'CPV', requests.c.state == 'RUNNING').limit(1))
+            if pending or running:
+                raise InteractionError('Изчакайте текущата CPV класификация и потвърдете отново.')
+
+            profile_revision = row['profile_revision'] + 1
+            category_revision = row['category_revision'] + 1
+            for activity in candidate:
+                s.execute(update(company_categories).where(company_categories.c.company_id == row['id'],
+                    company_categories.c.owner_user_id == owner['id'],
+                    company_categories.c.category_key == activity['category_key'])
+                    .values(activities_text=activity['activity']))
+            s.execute(update(companies).where(companies.c.id == row['id']).values(
+                classification_status='PENDING_CPV', profile_revision=profile_revision,
+                category_revision=category_revision, updated_at=func.now()))
+            intent_id = uuid4()
+            s.execute(insert(intents).values(id=intent_id, company_id=row['id'], owner_user_id=owner['id'],
+                kind='CPV_CLASSIFY', request_key_hash=key, input_digest=digest,
+                base_profile_revision=profile_revision, base_category_revision=category_revision,
+                company_generation=row['revocation_generation'], candidate_categories=candidate))
+            return str(intent_id)
 
 
 class BetaStore(DemoStore):
