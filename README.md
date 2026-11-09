@@ -24,7 +24,7 @@ This is a learning Beta, not a procurement advisory or legal verification servic
 - More powerful semantic models were not benchmarked, and there is no large representative independently human-verified evaluation dataset.
 - **Final Terra semantic accuracy flags are diagnostic-only in Beta.** A structurally usable report can contain mistakes or omissions. Technical source/job integrity, authorization, recipient binding, response structure and one-use delivery controls remain blocking.
 - Analysis accuracy, completeness, legal applicability and eligibility are not independently verified. Check the original documentation before making decisions.
-- The server process must remain running, although the user can close Telegram. Crash/uncertain reservations require operator review; there is no automatic paid replay. Gmail consent is currently memory-only and expires; renewed consent may be necessary.
+- The server process must remain running, although the user can close Telegram. Crash or uncertain reservations require operator review. Gmail access tokens expire and headless mode renews them using the configured refresh token.
 
 ## Local setup
 
@@ -60,6 +60,7 @@ See `.env.example` for names only; the application does **not** automatically lo
 - `DATABASE_URL`: local runtime PostgreSQL connection URL.
 - `P5_DB_SCOPE`: the same scope used during setup.
 - `GMAIL_SENDER`: your authorized Gmail sending account.
+- `GMAIL_OAUTH_MODE`: `desktop` by default. Use `headless` on Railway.
 - `GOOGLE_CLIENT_JSON_PATH`: Google Desktop OAuth JSON outside this repository.
 - `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`: supplied through the masked launcher or a secure server environment.
 
@@ -76,6 +77,26 @@ python scripts/start_beta.py --enable-paid-beta
 ```
 
 The launcher requests secrets with masked input and uses the existing send-only Google browser-consent flow. Never commit API keys, OAuth JSON/tokens, environment files, database dumps or reports. Without explicit paid-Beta activation the application cannot dispatch classification/analysis requests.
+
+### Headless Gmail authorization
+
+Keep the existing Desktop OAuth client in **External Testing** with Gmail API enabled and the configured `GMAIL_SENDER` listed as a test user. Shortly before the Beta, use a trusted local Windows desktop with the package installed. Set `GMAIL_SENDER` to that account, turn off clipboard history and cloud clipboard sync, and run:
+
+```powershell
+python scripts/authorize_gmail.py --client-json "PATH_TO_EXTERNAL_DESKTOP_CLIENT_JSON"
+```
+
+Consent as the configured sender. The helper requests offline access for `gmail.send`, requires Google to issue a refresh token, and copies that token to the clipboard without printing it. Paste directly into the Railway service variable `GOOGLE_OAUTH_REFRESH_TOKEN` and then clear the clipboard. Copy the matching client ID and secret from the same Desktop OAuth JSON into the other two deployment variables. Seal the client secret and refresh token in Railway and keep the JSON outside the repository and image. [Railway variable controls](https://docs.railway.com/variables#sealed-variables)
+
+| Variable | Railway value |
+| --- | --- |
+| `GMAIL_OAUTH_MODE` | `headless` |
+| `GMAIL_SENDER` | Gmail account that granted consent |
+| `GOOGLE_OAUTH_CLIENT_ID` | Existing Desktop OAuth client ID |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Existing Desktop OAuth client secret |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | Token issued to that client and sender |
+
+The worker checks the refresh grant at paid startup and renews its in-memory access token before a send when it is nearing expiry. An expired, revoked or invalid refresh grant stops authorization with a sanitized error. Repeat local consent and replace the Railway secret if needed. Google's External Testing refresh tokens for Gmail expire after seven days from issuance. [Google's token-expiration policy](https://developers.google.com/identity/protocols/oauth2#expiration)
 
 In Telegram: `/start` → create/confirm the business profile and email → wait for CPV classification → search → **Подробен анализ**. The first three registered accounts can onboard without administrator invitations. Each permitted request binds one job and one email to its confirmed address. A busy slot returns a clear response without consuming an analysis allowance; an accepted failed attempt is not automatically refunded or retried. Completion is announced only after Gmail confirms submission, which is distinct from verified inbox receipt.
 
@@ -115,7 +136,7 @@ The verification script uses disposable containers and an internal-only network,
 
 Supply configuration through the container environment or an environment file stored **outside** the repository; do not put secrets in command arguments or build arguments. `DATABASE_URL` must use `postgresql+psycopg://` and a restricted runtime login. Localhost remains accepted by default. For a Docker/private-network hostname, set `P5_DATABASE_HOST` to the **exact same hostname** in the URL. Only the optional `sslmode` URL query is accepted; unrelated connection overrides remain rejected. Keep `P5_DB_SCOPE` consistent with setup.
 
-Default startup requires `DATABASE_URL` and `TELEGRAM_BOT_TOKEN`, performs read-only database readiness, and runs one Telegram process plus the existing FastAPI liveness server. It does not enable paid processing. Pass `--enable-paid-beta` explicitly to retain the existing paid-Beta behavior; that also requires `OPENAI_API_KEY`, `GMAIL_SENDER`, `GOOGLE_CLIENT_JSON_PATH` and working Desktop Gmail browser consent. Environment variables alone cannot enable paid mode.
+Default startup requires `DATABASE_URL` and `TELEGRAM_BOT_TOKEN`, performs read-only database readiness, and runs one Telegram process plus the existing FastAPI liveness server. Paid processing requires `--enable-paid-beta`, `OPENAI_API_KEY`, `GMAIL_SENDER` and the credentials for the selected Gmail authorization mode. Desktop mode uses `GOOGLE_CLIENT_JSON_PATH` and local browser consent. Headless mode uses the three `GOOGLE_OAUTH_*` variables above.
 
 Container command modes:
 
@@ -133,6 +154,6 @@ No Railway configuration is activated or deployed. A future deployment would use
 
 Required future configuration: persistent PostgreSQL 17, restricted `DATABASE_URL`, exact `P5_DATABASE_HOST`, stable `P5_DB_SCOPE`, and `TELEGRAM_BOT_TOKEN`. Paid mode additionally needs the variables listed above. Keep administrator credentials separate and run schema setup explicitly before switching to the restricted role. Configure TLS through `sslmode` where required. Do not attach an ephemeral application container's filesystem as the only database storage.
 
-**Deployment blockers remain:** Gmail currently uses Desktop OAuth, a browser/loopback callback and a memory-only, expiring access grant. This is not an unattended headless authorization solution; paid startup is therefore not ready for Railway. Container restarts during analysis preserve durable reservations but do not resume work; outcomes may be uncertain and must not be retried automatically. Deployments/restarts must be scheduled while idle, with manual handling of interrupted jobs. PostgreSQL provisioning, persistence/backups, runtime secrets, explicit migration execution and platform shutdown behavior still need owner-reviewed deployment configuration. This ticket adds no recovery framework or token storage.
+**Deployment prerequisites:** complete the one-time local Gmail consent shortly before the Beta and configure the Railway secrets above. PostgreSQL provisioning, persistence and backups, explicit migration execution, and platform shutdown behavior still need deployment configuration. Schedule restarts while idle. Interrupted analyses retain their durable reservations and require manual review, including any uncertain send outcome.
 
 The optional FastAPI liveness endpoint (`ai_tender_intelligence.api:create_app`, factory mode) reports process health only, not database/integration readiness. Remote deployment is separate from CI and is not performed by this workflow.
