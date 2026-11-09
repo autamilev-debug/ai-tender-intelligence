@@ -177,6 +177,7 @@ tests/conftest.py
 tests/helpers.py
 tests/test_beta_pipeline.py
 tests/test_container_runtime.py
+tests/test_cpv_contract.py
 tests/test_email_policy.py
 tests/test_gmail_oauth.py
 tests/test_open_registration.py

@@ -15,6 +15,7 @@ MAX_BYTES, MAX_OUTPUT_TOKENS = 65536, 6000
 MAX_REQUEST_BYTES=131072
 # Technical defaults, not measured recall/capacity or new product policy.
 MAX_EXPLANATION = 1200
+RESPONSE_CATALOGUE_ERRORS = frozenset({'INVALID_CODE_SET', 'CODE_NOT_FOUND', 'CHECK_DIGIT_MISMATCH'})
 
 
 class ClassificationError(ValueError):
@@ -122,7 +123,13 @@ def validate_response(reply, request, snapshot):
             if not isinstance(identifier,str) or not IDENTIFIER.fullmatch(identifier):
                 raise ClassificationError('INVALID_IDENTIFIER')
             identifiers.append(identifier)
-        verified = snapshot.validate_set(identifiers)
+        verified = ()
+        if identifiers:
+            try:
+                verified = snapshot.validate_set(identifiers)
+            except CatalogueError as exc:
+                reason = exc.reason if exc.reason in RESPONSE_CATALOGUE_ERRORS else 'INVALID_RESPONSE'
+                raise ClassificationError(reason) from None
         activities = {c['category_key']:c['activity'] for c in request.categories}
         considered, seen = {}, set()
         for review in reviews:
@@ -162,6 +169,8 @@ def validate_response(reply, request, snapshot):
         for key,(_,reason) in considered.items():
             if (key in seen and reason is not None) or (key not in seen and reason is None):
                 raise ClassificationError('CATEGORY_COVERAGE')
+        if not selections:
+            raise ClassificationError('NO_SUPPORTED_MATCH')
         return tuple(v.entry.code for v in verified), data
     except ClassificationError:
         raise
