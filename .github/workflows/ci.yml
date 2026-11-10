@@ -39,6 +39,8 @@ jobs:
           python-version: '3.12'
       - name: Publication safety
         run: python scripts/check_public_tree.py --tracked
+      - name: Check source runtime dependencies and resources
+        run: python scripts/check_runtime_dependencies.py
       - name: Install verification tools
         run: python -m pip install -r requirements-ci.txt
       - name: Audit pinned dependencies
@@ -47,12 +49,16 @@ jobs:
           python -m pip_audit -r requirements-ci.txt
       - name: Build source distribution and wheel
         run: python -m build --outdir "$RUNNER_TEMP/packages"
-      - name: Install built application with declared constraints
-        run: python -m pip install -c constraints.txt "$RUNNER_TEMP"/packages/*.whl pytest
-      - name: Check dependencies and installed assets
+      - name: Install built wheel in a fresh virtual environment
+        run: |
+          python -m venv "$RUNNER_TEMP/runtime"
+          "$RUNNER_TEMP/runtime/bin/python" -m pip install -c constraints.txt "$RUNNER_TEMP"/packages/*.whl pytest
+          echo "$RUNNER_TEMP/runtime/bin" >> "$GITHUB_PATH"
+      - name: Verify installed resources and exercise isolated document workers
         run: |
           python -m pip check
-          python scripts/check_installed_package.py
+          python -I scripts/check_runtime_dependencies.py --installed
+          python -I scripts/check_installed_package.py
       - name: Initialize isolated test permissions
         env:
           PGPASSWORD: disposable-ci-only
@@ -64,7 +70,7 @@ jobs:
       - name: All real PostgreSQL integration tests
         run: |
           python -m pytest -q -m postgres --junitxml="$RUNNER_TEMP/postgres.xml"
-          python scripts/check_test_results.py "$RUNNER_TEMP/postgres.xml" --minimum 25
+          python scripts/check_test_results.py "$RUNNER_TEMP/postgres.xml" --minimum 32
       - name: Final publication check
         run: python scripts/check_public_tree.py --tracked
       - name: Build Docker image
