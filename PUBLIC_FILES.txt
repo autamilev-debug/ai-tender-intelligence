@@ -45,6 +45,7 @@ requirements-ci.txt
 scripts/authorize_gmail.py
 scripts/check_installed_package.py
 scripts/check_public_tree.py
+scripts/check_runtime_dependencies.py
 scripts/check_test_results.py
 scripts/start_beta.py
 scripts/verify_docker.py
@@ -57,6 +58,8 @@ src/ai_tender_intelligence/acquisition/schema.py
 src/ai_tender_intelligence/acquisition/service.py
 src/ai_tender_intelligence/acquisition/sources.py
 src/ai_tender_intelligence/acquisition/store.py
+src/ai_tender_intelligence/acquisition/validate_worker.py
+src/ai_tender_intelligence/acquisition/validation.py
 src/ai_tender_intelligence/acquisition/validator.py
 src/ai_tender_intelligence/analysis/__init__.py
 src/ai_tender_intelligence/analysis/admission45.py
@@ -107,12 +110,15 @@ src/ai_tender_intelligence/discovery/models.py
 src/ai_tender_intelligence/discovery/storage.py
 src/ai_tender_intelligence/discovery/ted.py
 src/ai_tender_intelligence/extraction/__init__.py
+src/ai_tender_intelligence/extraction/engine.py
+src/ai_tender_intelligence/extraction/formats.py
 src/ai_tender_intelligence/extraction/migrate.py
 src/ai_tender_intelligence/extraction/models.py
 src/ai_tender_intelligence/extraction/runner.py
 src/ai_tender_intelligence/extraction/schema.py
 src/ai_tender_intelligence/extraction/service.py
 src/ai_tender_intelligence/extraction/store.py
+src/ai_tender_intelligence/extraction/worker.py
 src/ai_tender_intelligence/matching/__init__.py
 src/ai_tender_intelligence/matching/engine.py
 src/ai_tender_intelligence/matching/geography.py
@@ -178,6 +184,7 @@ tests/helpers.py
 tests/test_beta_pipeline.py
 tests/test_container_runtime.py
 tests/test_cpv_contract.py
+tests/test_document_runtime.py
 tests/test_email_policy.py
 tests/test_gmail_oauth.py
 tests/test_open_registration.py
