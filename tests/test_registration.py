@@ -10,6 +10,7 @@ import json,os
 import httpx,pytest
 from sqlalchemy import select,insert,update,text,func
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
 from alembic import command
 from ai_tender_intelligence.persistence.database import Database,DatabaseSettings,PersistenceError
 from ai_tender_intelligence.persistence.migrate import migration_config
@@ -23,10 +24,12 @@ from ai_tender_intelligence.beta67.store import Profiles,BetaStore,Requests,Acce
 from ai_tender_intelligence.beta67.service import Coordinator,STARTED,PROCESSING,COMPLETED,FAILED
 from ai_tender_intelligence.beta67.telegram import BetaInteraction,Search
 from ai_tender_intelligence.beta67.classification import Luna,LunaWorker
+from ai_tender_intelligence.assets import root as asset_root
 from ai_tender_intelligence.demo41 import mail
 from ai_tender_intelligence.analysis.provider import RuntimeProvider
 from ai_tender_intelligence.telegram.models import ProfileFields,ManualClock,InputEvent,InteractionError
 from ai_tender_intelligence.telegram.models import canonical_label
+from ai_tender_intelligence.telegram.interaction import Snapshot
 from helpers import run as mocked_flow
 from ai_tender_intelligence.search_results.service import SearchResults
 from ai_tender_intelligence.classification.openai_provider import OpenAISettings
@@ -115,33 +118,64 @@ def test_database_owner_trigger_rejects_cross_links_and_identity_mutation(setup,
                 owner_user_id=UUID(a.id) if fault=='wrong_owner' else row['owner_user_id'],
                 company=UUID(a.id),kind='ANALYSIS',request_hash='bad',recipient='b@example.invalid',state='RUNNING'))
 
-def test_allowance_and_global_capacity_are_atomic_across_restart(setup):
-    db,p,store=setup;a=company(p);b=company(p,202)
-    ledger=Requests(store);ident=ledger.reserve(101,a.id,'one')
-    for user,c,key in [(101,a.id,'one'),(101,a.id,'two'),(202,b.id,'one')]:
-        with pytest.raises(InteractionError):Requests(BetaStore(db,{101,202})).reserve(user,c,key)
-    ledger.finish(101,a.id,ident,False,{'code':'MOCK_FAILURE'})
-    with pytest.raises(InteractionError):Requests(store).reserve(101,a.id,'three')
-    assert ledger.reserve(202,b.id,'one')
+def test_new_analysis_after_failure_preserves_the_original_request_and_job(setup):
+    db, profiles, store = setup
+    profile = company(profiles)
+    selection = {'parent': 1, 'lots': [2]}
+    failing, failed_calls, failed_emails = coordinator(store, fault='http-failure')
+    original = failing.submit(101, profile.id, selection, 'failed-confirmation')
+    restarted = BetaStore(db, {101})
+    ledger = Requests(restarted)
+    previous = ledger.read(101, profile.id, original)
+    failed_job = restarted.read(101, profile.id, previous['job'])
+    assert previous['state'] == failed_job['state'] == 'FAILED'
+    assert len(failed_calls[0]) == 1 and not failed_emails
 
-def test_concurrent_different_users_have_one_slot_no_silent_queue(setup):
-    db,p,store=setup;a=company(p);b=company(p,202)
+    succeeding, calls, emails = coordinator(restarted)
+    with pytest.raises(InteractionError, match='вече е приета'):
+        succeeding.submit(101, profile.id, selection, 'failed-confirmation')
+    new = succeeding.submit(101, profile.id, selection, 'new-confirmation')
+    current = ledger.read(101, profile.id, new)
+    assert current['state'] == 'DONE' and new != original and current['job'] != previous['job']
+    assert len(calls) == len(emails) == 1
+    assert ledger.read(101, profile.id, original) == previous
+    assert restarted.read(101, profile.id, previous['job']) == failed_job
+
+
+@pytest.mark.parametrize('same_account', [False, True])
+def test_concurrent_requests_have_one_slot_no_silent_queue(setup, same_account):
+    _, profiles, store = setup
+    first = company(profiles)
+    second = first if same_account else company(profiles, 202)
+    start = Barrier(2)
+
     def reserve(pair):
-        try:return Requests(store).reserve(pair[0],pair[1],'concurrent')
-        except InteractionError:return None
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        values=list(pool.map(reserve,[(101,a.id),(202,b.id)]))
-    assert sum(v is not None for v in values)==1
+        user, profile, key = pair
+        start.wait(timeout=5)
+        try:
+            return Requests(store).reserve(user, profile.id, key)
+        except InteractionError as error:
+            assert 'обработва друга заявка' in str(error)
+            return None
 
-def test_two_complete_mocked_pipelines_bind_actual_plan_and_correct_email(setup):
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        values = list(pool.map(reserve, [(101, first, 'first'), (second.owner, second, 'second')]))
+    assert sum(value is not None for value in values) == 1
+
+def test_completed_analyses_bind_independent_plans_and_correct_recipients(setup):
     db,p,store=setup;a=company(p);b=company(p,202)
     co,calls,emails=coordinator(store)
-    for user,c in [(101,a),(202,b)]:
-        co.submit(user,c.id,{'parent':1,'lots':[2]},'owner-request')
+    jobs = set()
+    ledger = Requests(store)
+    for user,c,key in [(101,a,'owner-request'),(202,b,'owner-request'),(101,a,'separate-confirmation')]:
+        request = co.submit(user,c.id,{'parent':1,'lots':[2]},key)
         events=co.drain()
         with db.transaction() as s:diagnostics=list(s.scalars(select(schema.requests.c.diagnostic)))
         assert events==[(user,'PROCESSING'),(user,'COMPLETED')],diagnostics
-        row=store.entries(user,c.id)[0]
+        saved = ledger.read(user,c.id,request)
+        row = store.read(user,c.id,saved['job'])
+        assert saved['state'] == 'DONE' and row['id'] not in jobs
+        jobs.add(row['id'])
         assert row['state']=='MOCK_EMAIL_ACCEPTED' and row['send_attempts']==1
         assert row['evidence']['BETA67_AUTHORITY']['ai_approval']['actor']==user
         assert row['evidence']['RUN_STARTED46']['replay_allowed'] is False
@@ -153,11 +187,107 @@ def test_two_complete_mocked_pipelines_bind_actual_plan_and_correct_email(setup)
         other=202 if user==101 else 101
         with pytest.raises(InteractionError):
             store.reserve_send(other,c.id,row['id'],row['mime_sha256'])
-    assert [r for r,_ in emails]==['a@example.invalid','b@example.invalid']
+    assert [r for r,_ in emails]==['a@example.invalid','b@example.invalid','a@example.invalid']
     assert all([c['model'] for c in batch]==['gpt-6.1-sol']*8+['gpt-6.1-terra'] for batch in calls)
     assert all(c['max_output_tokens']==100000 for batch in calls for c in batch)
     with pytest.raises(InteractionError):co.submit(101,a.id,{'parent':1,'lots':[2]},'owner-request')
-    assert len(emails)==2
+    assert len(calls)==len(emails)==3
+
+
+def test_legacy_index_migration_is_explicit_idempotent_and_preserves_history(setup):
+    db, profiles, store = setup
+    profile = company(profiles)
+    migration = (asset_root() / 'migrations/beta/0001_remove_lifetime_analysis_limit.sql').read_text(encoding='utf-8')
+
+    def apply_migration():
+        with db.engine.begin() as connection:
+            connection.exec_driver_sql(migration)
+
+    def indexes():
+        with db.transaction() as session:
+            return set(session.scalars(text(
+                "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND tablename='beta67_requests'"
+            )))
+
+    legacy = 'uq_beta68_one_analysis_account'
+    assert legacy not in indexes()
+    with db.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX uq_beta68_one_analysis_account "
+            "ON public.beta67_requests (scope, owner) WHERE kind='ANALYSIS'"
+        )
+    ledger = Requests(store)
+    try:
+        original = ledger.reserve(101, profile.id, 'legacy-confirmation')
+        with pytest.raises(DBAPIError, match='BETA_PROCESSING_SLOT_BUSY'):
+            apply_migration()
+        assert legacy in indexes()
+        ledger.finish(101, profile.id, original, False, {'code': 'LEGACY_FAILURE'})
+        before = ledger.read(101, profile.id, original)
+        with pytest.raises(PersistenceError):
+            ledger.reserve(101, profile.id, 'new-confirmation')
+        schema.install(db)
+        assert legacy in indexes()  # Existing installations use the explicit migration.
+
+        apply_migration()
+        apply_migration()
+        schema.install(db)
+        assert legacy not in indexes() and 'uq_beta67_capacity' in indexes()
+        assert ledger.reserve(101, profile.id, 'new-confirmation') != original
+        assert ledger.read(101, profile.id, original) == before
+    finally:
+        with db.engine.begin() as connection:
+            connection.exec_driver_sql("DROP INDEX IF EXISTS public.uq_beta68_one_analysis_account")
+
+
+@pytest.mark.parametrize('entrypoint', ['button', 'command'])
+def test_telegram_requires_fresh_owner_confirmation_for_a_paid_analysis(setup, entrypoint):
+    _, profiles, store = setup
+    profile = company(profiles)
+    co, calls, emails = coordinator(store)
+    title = 'Синтетична поръчка'
+    opportunity = SimpleNamespace(record_id='record', title=title, original_id='EOP1',
+                                  lots=[SimpleNamespace(lot_id='LOT-2')])
+    stored = SimpleNamespace(id='search-id',
+        result=SimpleNamespace(matches=SimpleNamespace(opportunities=[opportunity])),
+        source_payloads={'record': {'official_url':'https://app.eop.bg/today/1',
+            'lots':[{'id':'LOT-2','source_fields':{'tenderId':2}}]}})
+
+    def read(user, selected_company, reference):
+        assert (user, selected_company, reference) == (101, profile.id, stored.id)
+        return stored
+
+    tenders = (SimpleNamespace(id='procedure'),)
+    search = SimpleNamespace(results=SimpleNamespace(read=read),
+        stored_results=lambda *args: tenders, snapshot_reference=lambda *args: stored.id)
+    clock = ManualClock()
+    ui = BetaInteraction(SimpleNamespace(profiles=profiles, classifications=profiles, search=search),
+                         clock, {101}, coordinator=co)
+    ui.handle(InputEvent(101,101,0,text='/start'))
+    ui.snapshots['snapshot'] = Snapshot(101,profile.id,tenders,clock.now(),stored_reference=stored.id)
+
+    def select_analysis(update_id):
+        if entrypoint == 'command':
+            return ui.handle(InputEvent(101,101,update_id,text='/analyze44 1'))[0]
+        card = ui._button(101,'Подробен анализ','deep','snapshot/procedure',profile.id)
+        return ui.handle(InputEvent(101,101,update_id,callback=card.callback_data))[0]
+
+    review = select_analysis(1)
+    confirm, cancel = review.keyboard[0]
+    assert title in review.text and 'платения' in review.text
+    assert not calls and not emails and not store.entries(101,profile.id)
+    denied = ui.handle(InputEvent(202,202,2,callback=confirm.callback_data))
+    assert 'невалидно' in denied[0].text and not calls
+    ui.handle(InputEvent(101,101,3,callback=cancel.callback_data))
+    assert not ui.handle(InputEvent(101,101,4,callback=confirm.callback_data))
+    assert not calls
+
+    review = select_analysis(5)
+    confirm, _ = review.keyboard[0]
+    started = ui.handle(InputEvent(101,101,6,callback=confirm.callback_data))
+    assert any(STARTED in message.text for message in started)
+    assert not ui.handle(InputEvent(101,101,7,callback=confirm.callback_data))
+    assert len(calls)==len(emails)==1 and len(store.entries(101,profile.id))==1
 
 @pytest.mark.parametrize('fault',['http-failure','all-invalid-beta','gmail-timeout'])
 def test_failure_never_emits_false_success_or_replays(setup,fault):

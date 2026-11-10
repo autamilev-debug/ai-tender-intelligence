@@ -9,6 +9,7 @@ metadata = MetaData()
 invites = Table('beta67_invites', metadata,
     C('scope', Text, primary_key=True), C('telegram_id', BigInteger, primary_key=True),
     C('enabled', Boolean, nullable=False, server_default=text('true')),
+    # Retain the legacy column and its values for schema compatibility.
     C('analysis_limit', Integer, nullable=False, server_default='1'),
     CheckConstraint('telegram_id > 0 AND analysis_limit > 0'))
 
@@ -37,7 +38,6 @@ requests = Table('beta67_requests', metadata,
     CheckConstraint("kind IN ('ANALYSIS','CPV') AND state IN ('RUNNING','DONE','FAILED')"))
 Index('uq_beta67_capacity', requests.c.scope, unique=True, postgresql_where=requests.c.state=='RUNNING')
 
-one_analysis=Index('uq_beta68_one_analysis_account',requests.c.scope,requests.c.owner,unique=True,postgresql_where=requests.c.kind=='ANALYSIS')
 VERSION = 'b0002_open_beta'
 registration_policy=Table('beta68_registration_policy',metadata,C('scope',Text,primary_key=True),C('account_limit',Integer,nullable=False),CheckConstraint('account_limit=3'))
 version_table=Table('beta67_schema_version',metadata,C('version_num',Text,primary_key=True))
@@ -95,7 +95,6 @@ def install(db):
             exists=c.scalar(text('SELECT 1 FROM pg_trigger WHERE tgname=:name'),{'name':table.name+'_owner'})
             if not exists:c.execute(text(f'CREATE TRIGGER {table.name}_owner BEFORE INSERT OR UPDATE ON {table.name} FOR EACH ROW EXECUTE FUNCTION beta67_owner_guard()'))
         registration_policy.create(c,checkfirst=True)
-        one_analysis.create(c,checkfirst=True)
         if c.scalar(text('SELECT count(*) FROM telegram_users WHERE scope=:scope'),{'scope':db.settings.scope})>3:
             raise ValueError('EXISTING_ACCOUNTS_EXCEED_BETA_CAPACITY')
         c.execute(insert(registration_policy).values(scope=db.settings.scope,account_limit=3).on_conflict_do_nothing())
@@ -111,7 +110,7 @@ def install(db):
         if not c.scalar(text("SELECT 1 FROM pg_trigger WHERE tgname='beta68_account_capacity'")):
             c.execute(text('CREATE TRIGGER beta68_account_capacity BEFORE INSERT ON telegram_users FOR EACH ROW EXECUTE FUNCTION beta68_registration_guard()'))
         for user in c.scalars(text('SELECT telegram_user_id FROM telegram_users WHERE scope=:scope'),{'scope':db.settings.scope}):
-            c.execute(insert(invites).values(scope=db.settings.scope,telegram_id=user,analysis_limit=1).on_conflict_do_nothing())
+            c.execute(insert(invites).values(scope=db.settings.scope,telegram_id=user).on_conflict_do_nothing())
         if c.scalar(text("SELECT 1 FROM pg_roles WHERE rolname='p5_search_runtime'")):grant_runtime(c)
 
 

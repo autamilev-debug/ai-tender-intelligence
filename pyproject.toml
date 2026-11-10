@@ -45,6 +45,7 @@ markers = ["postgres: requires the explicitly configured disposable local Postgr
 "share/ai-tender-intelligence/prompts" = ["prompts/luna_cpv_classification.md", "prompts/luna_evidence_verification.md", "prompts/luna_evidence_verification_v3.md", "prompts/shared_rules.md", "prompts/sol_evidence_shortrefs37.md", "prompts/sol_internal54.md", "prompts/sol_processing58.md", "prompts/sol_tender_report.md", "prompts/submission_evidence_v4.md", "prompts/submission_references_v5.md", "prompts/terra_beta59.md", "prompts/terra_bulgarian_email_p40.md", "prompts/terra_bulgarian_email_v2.md", "prompts/terra_internal54.md", "prompts/terra_report_v1.md"]
 "share/ai-tender-intelligence/reference-data/cpv/2008" = ["reference-data/cpv/2008/PROVENANCE.json", "reference-data/cpv/2008/PROVENANCE.md", "reference-data/cpv/2008/cpv_2008.xml"]
 "share/ai-tender-intelligence/migrations" = ["migrations/env.py", "migrations/script.py.mako"]
+"share/ai-tender-intelligence/migrations/beta" = ["migrations/beta/0001_remove_lifetime_analysis_limit.sql"]
 "share/ai-tender-intelligence/migrations/versions" = ["migrations/versions/0001_profiles.py", "migrations/versions/0001_profiles.sql", "migrations/versions/0002_classification.py", "migrations/versions/0003_prompts.py", "migrations/versions/0004_searches.py"]
 "share/ai-tender-intelligence/discovery_migrations" = ["discovery_migrations/env.py"]
 "share/ai-tender-intelligence/discovery_migrations/versions" = ["discovery_migrations/versions/d0001_discovery.py"]

@@ -38,15 +38,12 @@ class Search(LiveOwnerSearch):
 
 class BetaInteraction(Interaction):
     def __init__(self,*a,coordinator,**kw):
-        super().__init__(*a,**kw);self.allowed_users=PublicTelegramUsers();self.coordinator=coordinator;self.event_ids={}
+        super().__init__(*a,**kw);self.allowed_users=PublicTelegramUsers();self.coordinator=coordinator
     def bind_publisher(self,publish):SearchOnlyInteraction.bind_publisher(self,publish)
     def _message(self,user,text,*a,**kw):
         self.session_notified.add(user)  # Real internal Beta, not a synthetic UI.
         kw.pop('demo',None)
         return super()._message(user,text,*a,**kw)
-    def handle(self,event):
-        if event.user_id in self.allowed_users:self.event_ids[event.user_id]=event.update_id
-        return super().handle(event)
     def _start(self,user):
         self.services.profiles.register(user)
         for c in self.services.profiles.companies(user):
@@ -124,7 +121,7 @@ class BetaInteraction(Interaction):
             company=self.selected.get(user)
             if not company:raise InteractionError('Първо изберете фирма и направете търсене.')
             reference=self.services.search.snapshot_reference(user,company)
-            return self._analyze(user,company,reference,int(match[1])-1,'telegram:'+str(self.event_ids[user]))
+            return self._review_analysis(user,company,reference,int(match[1])-1)
         return super()._text(user,text)
     def _dispatch(self,user,a):
         if a.name == 'recover_cpv':
@@ -158,23 +155,54 @@ class BetaInteraction(Interaction):
             tenders=self.services.search.stored_results(user,a.company,snap.stored_reference)
             index=next((i for i,t in enumerate(tenders) if t.id==tender),None)
             if index is None:raise InteractionError('Невалидна поръчка.')
-            return self._analyze(user,a.company,snap.stored_reference,index,'button:'+a.operation_id)
+            return self._review_analysis(user,a.company,snap.stored_reference,index,
+                                         expires=snap.created+timedelta(minutes=30))
+        if a.name=='confirm_analysis':
+            return self._analyze(user,a)
+        if a.name=='cancel_analysis':
+            confirmation = self.actions.get(a.target)
+            if confirmation is None or confirmation.used:
+                return []
+            confirmation.used = True
+            return self._close_controls(user,a.source_message,[self._message(user,'Заявката за анализ е отменена.')])
         if a.name in {'historical','retry','received','not_received','save','remove'}:
-            raise InteractionError('Повторно изпращане и повторни анализи не са включени в този Бета тест.')
+            raise InteractionError('За нов анализ изберете поръчка от търсенето и потвърдете нова заявка.')
         return super()._dispatch(user,a)
-    def _analyze(self,user,company,reference,index,key):
+
+    def _review_analysis(self,user,company,reference,index,*,expires=None):
         stored=self.services.search.results.read(user,company,reference)
         opportunities=stored.result.matches.opportunities
         if not 0<=index<len(opportunities):raise InteractionError('Няма такава поръчка.')
-        o=opportunities[index];payload=stored.source_payloads.get(o.record_id,{})
+        opportunity = opportunities[index]
+        confirm = self._button(user,'Потвърди анализа','confirm_analysis',opportunity.record_id,company)
+        cancel = self._button(user,'Отказ','cancel_analysis',confirm.callback_data,company)
+        title = ' '.join((opportunity.title or opportunity.original_id).split())[:350]
+        message = self._message(user,
+            f'Потвърдете платения подробен анализ на тази поръчка.\n\n{title}\n\n'
+            'При успешна обработка ще получите доклада на имейла в профила.',
+            [(confirm,cancel)])
+        self.actions[confirm.callback_data].stored_reference = stored.id
+        for button in (confirm,cancel):
+            action = self.actions[button.callback_data]
+            action.source_message = message.id
+            if expires is not None:
+                action.expires = min(action.expires, expires)
+        return [message]
+
+    def _analyze(self,user,confirmation):
+        company, reference = confirmation.company, confirmation.stored_reference
+        stored = self.services.search.results.read(user,company,reference)
+        o = next((item for item in stored.result.matches.opportunities if item.record_id == confirmation.target),None)
+        if o is None:raise InteractionError('Невалидна поръчка.')
+        payload=stored.source_payloads.get(o.record_id,{})
         try:parent,single=procedure_mapping(payload,o)
         except NotSent:raise InteractionError('Позициите на тази поръчка не могат да бъдат потвърдени.') from None
         relevant={l.lot_id for l in o.lots}
         lots=[l.get('source_fields',{}).get('tenderId') for l in payload.get('lots',[]) if l['id'] in relevant]
         if relevant=={'PROCEDURE'} or single:lots=[]
         selection={'search_id':reference,'record_id':o.record_id,'parent':parent,'lots':lots}
-        self.coordinator.submit(user,company,selection,key)
-        return [self._message(user,service.STARTED)]
+        self.coordinator.submit(user,company,selection,'analysis-confirmation:'+confirmation.operation_id)
+        return self._close_controls(user,confirmation.source_message,[self._message(user,service.STARTED)])
     def _card(self,user,company,tender,snapshot,**kw):
         message=super()._card(user,company,tender,snapshot,**kw)
         rows=[(self._button(user,'Подробен анализ','deep',snapshot+'/'+tender.id,company),)]

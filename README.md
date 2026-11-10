@@ -7,7 +7,7 @@ The complete workflow has passed a controlled live end-to-end demonstration, inc
 ## What the application does
 
 - Self-service registration through a private Telegram chat, identified by Telegram user ID rather than username.
-- A deliberately small Beta: **three registered accounts total**, **one analysis per account**, and **one concurrent processing slot**, enforced in PostgreSQL. Existing accounts count toward capacity; duplicate registration does not consume another slot.
+- A deliberately small Beta with **three registered accounts total** and **one concurrent processing slot**, enforced in PostgreSQL. Each account can request separate analyses. Each request requires its own confirmation.
 - Separate company profiles, confirmed report-email settings, official CPV classification, private search snapshots, analysis jobs and report history.
 - Official-source discovery with direct/related/broader relevance labels, source-backed location, up to 15 results and five-result pages. Published search status is not a guarantee of current bidding availability: analysis admission independently verifies supported official OPEN evidence.
 - Bounded acquisition and extraction, source hashes and provenance, deterministic evidence retrieval, exact citations and applicability metadata.
@@ -49,9 +49,67 @@ Set `DATABASE_URL` securely in the current process to the administrator connecti
 ai-tender-setup --apply
 ```
 
-Setup applies the included independent migration streams, verifies/imports the bundled official CPV 2008 catalogue and installs Beta registration/quota controls. It does not start Telegram, call models or send email. Startup never migrates. Back up an existing database before an explicit upgrade; protected evaluation/document databases are not reset.
+Setup applies the included independent migration streams, verifies/imports the bundled official CPV 2008 catalogue and installs the Beta registration and processing controls. Existing Beta databases use the separate upgrade below.
 
 Replace `DATABASE_URL` with the **restricted runtime** connection URL before starting the application. The runtime role must not be a superuser or have database/role-creation privileges. On Windows, if native PostgreSQL DLL loading is restricted, use the existing approved PostgreSQL client installation on `PATH`; do not disable Windows security protections.
+
+### Upgrade an existing Beta database for repeat analyses
+
+1. Confirm a restorable backup and schedule an idle window. Pause new Telegram requests through rollout. For a deployment that follows `main` automatically, apply the SQL **before merging** the new application code. The previous application still enforces its account limit during this interval. Fresh installations already omit the index.
+2. Confirm the linked Railway project and production environment, then open the private tunnel in a dedicated PowerShell window. Keep the window open. Suppress tunnel output because it contains connection details.
+
+   ```powershell
+   railway status
+   railway connect postgres-17 --environment production --tunnel-only --port 15432 *> $null
+   ```
+
+3. From the reviewed checkout in a separate PowerShell window, connect with the database/index owner. Enter the password at the `psql` prompt.
+
+   ```powershell
+   $dbName = Read-Host 'Confirmed production database name'
+   $dbOwner = Read-Host 'Database owner login'
+   $env:PGSSLMODE = 'require'
+   psql -X -W -h 127.0.0.1 -p 15432 -U $dbOwner -d $dbName -v ON_ERROR_STOP=1
+   ```
+
+   ```sql
+   SELECT current_database(), current_user;
+   SELECT count(*) AS running FROM public.beta67_requests WHERE state = 'RUNNING';
+   SELECT to_regclass('public.uq_beta68_one_analysis_account') AS lifetime_index,
+          to_regclass('public.uq_beta67_capacity') AS processing_slot_index;
+   ```
+
+4. Verify the database and owner, zero running requests, and the presence of the processing-slot index. Exit `psql` with `\q`, then apply the migration.
+
+   ```powershell
+   psql -X -W -h 127.0.0.1 -p 15432 -U $dbOwner -d $dbName --single-transaction -v ON_ERROR_STOP=1 -f .\migrations\beta\0001_remove_lifetime_analysis_limit.sql
+   if ($LASTEXITCODE -ne 0) { throw 'Beta index migration failed' }
+   ```
+
+   The migration takes a bounded lock, refuses a busy slot, and changes only the lifetime index. Rerun the checks above. The lifetime index should be absent and the processing-slot index should still exist. Close the tunnel and clear `PGSSLMODE` from the temporary shell.
+
+5. Merge and deploy the reviewed application during the same idle window. Verify runtime readiness and `/health/live` before reopening Telegram requests. Each new run starts with a fresh user confirmation.
+
+For rollback, pause intake and wait for the slot to be idle. Rolling back just the application restores the previous application-level limit while retaining every request. The old unique index can be restored only before any account has multiple analysis records in the same scope. Check for duplicates first.
+
+```sql
+SELECT count(*) FROM (
+    SELECT scope, owner FROM public.beta67_requests
+    WHERE kind = 'ANALYSIS' GROUP BY scope, owner HAVING count(*) > 1
+) AS accounts_with_repeat_analyses;
+```
+
+If the count is zero and schema rollback is required, the database owner can run the original definition in a transaction during the idle window.
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_beta68_one_analysis_account
+    ON public.beta67_requests (scope, owner) WHERE kind = 'ANALYSIS';
+COMMIT;
+```
+
+When repeat records exist, use an application-only rollback and keep the index absent. Preserve every historical row and avoid running the previous installer, which attempts to recreate the index.
 
 ## Configuration and startup
 
@@ -98,7 +156,7 @@ Consent as the configured sender. The helper requests offline access for `gmail.
 
 The worker checks the refresh grant at paid startup and renews its in-memory access token before a send when it is nearing expiry. An expired, revoked or invalid refresh grant stops authorization with a sanitized error. Repeat local consent and replace the Railway secret if needed. Google's External Testing refresh tokens for Gmail expire after seven days from issuance. [Google's token-expiration policy](https://developers.google.com/identity/protocols/oauth2#expiration)
 
-In Telegram: `/start` → create/confirm the business profile and email → wait for CPV classification → search → **Подробен анализ**. The first three registered accounts can onboard without administrator invitations. Each permitted request binds one job and one email to its confirmed address. A busy slot returns a clear response without consuming an analysis allowance; an accepted failed attempt is not automatically refunded or retried. Completion is announced only after Gmail confirms submission, which is distinct from verified inbox receipt.
+In Telegram, use `/start` to open a ready company profile, search, choose **Подробен анализ**, and press **Потвърди анализа** to authorize the paid run. The first three accounts can register without invitations. Each confirmation binds one job and one email to the profile's confirmed address. The bot declines new work while the slot is busy. After a failed or completed request, a fresh selection and confirmation create a separate request. Telegram announces completion after Gmail accepts the submission. Inbox receipt is a separate check.
 
 ## Tests and publication checks
 
@@ -116,11 +174,11 @@ python scripts/check_public_tree.py
 
 ## Continuous integration
 
-Pushes to `main` and pull requests targeting `main` run `.github/workflows/ci.yml` on Ubuntu with Python 3.12 and an isolated PostgreSQL 17 service. CI checks imports, subprocess targets and packaged resources. It builds a source distribution and wheel, installs the wheel into a fresh virtual environment with `constraints.txt`, scans pinned dependencies with pip-audit, and runs every offline and PostgreSQL test. The integration-result check rejects skips and fewer than 32 database tests. CI also runs real document validation and extraction on synthetic files in the production image with networking disabled. No real Telegram, OpenAI or Gmail credentials are needed.
+Pushes to `main` and pull requests targeting `main` run `.github/workflows/ci.yml` on Ubuntu with Python 3.12 and an isolated PostgreSQL 17 service. CI checks imports, subprocess targets and packaged resources. It builds a source distribution and wheel, installs the wheel into a fresh virtual environment with `constraints.txt`, scans pinned dependencies with pip-audit, and runs every offline and PostgreSQL test. The integration-result check rejects skips and fewer than 36 database tests. CI also runs real document validation and extraction on synthetic files in the production image with networking disabled. No real Telegram, OpenAI or Gmail credentials are needed.
 
 CI also checks the explicit publication allowlist, tracked files, credential patterns and prohibited private artifacts. These checks reduce accidental disclosure; they do not guarantee that every possible secret or vulnerability can be detected. Verification tools are pinned in `requirements-ci.txt`. When updating dependencies, review both the project constraints and current advisory results; do not suppress findings without review.
 
-For a local equivalent, run `python scripts/check_runtime_dependencies.py`, install `requirements-ci.txt`, and build with `python -m build`. In a fresh virtual environment with the wheel and pytest installed, run `python -m pip check`, `python -I scripts/check_runtime_dependencies.py --installed` and `python -I scripts/check_installed_package.py` before pytest with the explicitly disposable database setting above. Use `python scripts/check_test_results.py postgres.xml --minimum 32` with pytest's PostgreSQL JUnit output to ensure integration tests were executed. `python scripts/check_public_tree.py --tracked` additionally requires the Git index to match `PUBLIC_FILES.txt` exactly after you manually stage reviewed changes.
+For a local equivalent, run `python scripts/check_runtime_dependencies.py`, install `requirements-ci.txt`, and build with `python -m build`. In a fresh virtual environment with the wheel and pytest installed, run `python -m pip check`, `python -I scripts/check_runtime_dependencies.py --installed` and `python -I scripts/check_installed_package.py` before pytest with the explicitly disposable database setting above. Use `python scripts/check_test_results.py postgres.xml --minimum 36` with pytest's PostgreSQL JUnit output to ensure integration tests were executed. `python scripts/check_public_tree.py --tracked` additionally requires the Git index to match `PUBLIC_FILES.txt` exactly after you manually stage reviewed changes.
 
 ## Docker
 
@@ -144,7 +202,7 @@ Container command modes:
 - `--check`: read-only database/schema/permissions readiness; no Telegram/model/Gmail calls.
 - `--setup`: explicit administrator migration/catalogue setup; never run automatically at startup. Create the restricted `p5_search_runtime` role first, as above.
 - `--health-only`: liveness server only, for isolated checks; it is **not** a running bot or a demonstration of integration readiness.
-- No flags: normal bot plus liveness. Optional `--enable-paid-beta` retains existing authorization, quotas and durable no-replay controls.
+- No flags: normal bot plus liveness. Optional `--enable-paid-beta` enables user-confirmed paid execution with the existing per-run limits and durable no-replay controls.
 
 For normal startup, provide your external environment file to `docker run`, map the configured port and use `--stop-timeout 35`. The launcher gives children up to 25 seconds to close before force-stopping; use `docker logs` to inspect sanitized process output. There is no automatic application restart, model retry or Gmail resend. Longer active analyses can outlive this shutdown window and require manual review of durable records; an interrupted attempt must not be replayed.
 
