@@ -50,3 +50,18 @@ def test_ci_cannot_pass_with_skipped_or_missing_postgres_tests(tmp_path,status):
 def test_ci_accepts_executed_postgres_tests(tmp_path):
     xml=tmp_path/'results.xml';xml.write_text('<testsuite><testcase/></testsuite>')
     assert load('check_test_results').check(xml,1)==1
+
+
+@pytest.mark.parametrize('missing', [
+    'acquisition.validate_worker', 'acquisition.validation',
+    'extraction.worker', 'extraction.engine', 'extraction.formats',
+])
+def test_ci_fails_with_any_missing_document_runtime_module(missing):
+    checker = load('check_runtime_dependencies')
+    package = ROOT / 'src' / checker.PACKAGE
+    sources = checker.modules(package)
+    module = checker.PACKAGE + '.' + missing
+    del sources[module]
+    with pytest.raises(ValueError, match='Missing internal runtime dependencies') as error:
+        checker.check_imports(sources)
+    assert module in str(error.value)

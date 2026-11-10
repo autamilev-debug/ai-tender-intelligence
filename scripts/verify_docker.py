@@ -28,11 +28,12 @@ def verify(image):
     try:
         result=docker('run','--rm','--network','none','--read-only','--tmpfs','/tmp',image,'--offline-check')
         assert 'Installed entrypoints' in result.stdout
+        assert 'Document workers verified:' in result.stdout
         assert docker('run','--rm','--network','none','--entrypoint','python',image,
                       '-c','import os; assert os.getuid() != 0; print("non-root")').stdout.strip()=='non-root'
         missing=docker('run','--rm','--network','none',image,success=False)
         assert missing.returncode==2 and 'DATABASE_URL, TELEGRAM_BOT_TOKEN' in missing.stderr
-        print('PASS: installed assets, non-root user and missing-configuration failure',flush=True)
+        print('PASS: installed assets, isolated document workers, non-root user and missing-configuration failure',flush=True)
 
         containers.append(web)
         docker('run','-d','--name',web,'--network','none','--read-only','--tmpfs','/tmp',
