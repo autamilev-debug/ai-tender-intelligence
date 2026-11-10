@@ -81,8 +81,10 @@ class DocHTTP:
                         if hs.get('content-encoding','identity') not in {'','identity'}:raise AcquisitionError('UNSUPPORTED_HTTP_ENCODING')
                         try:
                             length=int(hs['content-length']) if 'content-length' in hs else None
-                            if length is not None and not 0<=length<=limit:raise AcquisitionError('DOWNLOAD_SIZE_BOUND')
                         except ValueError:raise AcquisitionError('INVALID_CONTENT_LENGTH') from None
+                        if length is not None:
+                            if length < 0:raise AcquisitionError('INVALID_CONTENT_LENGTH')
+                            if length > limit:raise AcquisitionError('DOWNLOAD_SIZE_BOUND')
                         data=bytearray()
                         for chunk in (r.iter_bytes() if self.client else r.iter_stream()):
                             data.extend(chunk);self.bytes+=len(chunk)
