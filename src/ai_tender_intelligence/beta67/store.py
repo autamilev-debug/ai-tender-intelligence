@@ -1,5 +1,5 @@
 from ..persistence.identity import freeze_users
-"""Invited identity, private jobs and atomic one-request-per-tester allowances."""
+"""Registered identity, private jobs and atomic request reservations."""
 from contextlib import contextmanager
 from dataclasses import replace
 from hashlib import sha256
@@ -15,7 +15,6 @@ DENIED='Първо се регистрирайте чрез /start.'
 CAPACITY='Бета версията е ограничена до три регистрирани акаунта. В момента няма свободни места.'
 REGISTRATION_LOCK=0x5035524547
 BUSY='В момента се обработва друга заявка. Моля, опитайте отново по-късно.'
-LIMIT='Разрешеният брой Бета анализи е използван. Няма да бъде стартиран нов анализ.'
 LOCK=0x503542455441
 
 
@@ -42,7 +41,7 @@ class Access:
                     telegram_user_id=user,private_chat_id=user))
             # Existing storage foreign keys retain this automatically populated
             # membership row. It is not an invitation or administrator gate.
-            s.execute(pg_insert(invites).values(scope=self.db.settings.scope,telegram_id=user,analysis_limit=1)
+            s.execute(pg_insert(invites).values(scope=self.db.settings.scope,telegram_id=user)
                       .on_conflict_do_nothing())
             return str(ident)
     def guard(self,user,*,session=None):
@@ -153,7 +152,7 @@ class Requests:
         kind='CPV' if intent is not None else 'ANALYSIS'
         hashed=sha256((kind+':'+key).encode()).hexdigest()
         with self.store.access(user,company) as (s,c):
-            invite=self.access.guard(user,session=s)
+            self.access.guard(user,session=s)
             s.execute(text('SELECT pg_advisory_xact_lock(:key)'),{'key':LOCK})
             old=s.execute(select(requests).where(requests.c.scope==self.db.settings.scope,
                 requests.c.owner==user,requests.c.request_hash==hashed)).mappings().first()
@@ -161,12 +160,8 @@ class Requests:
             if s.scalar(select(func.count()).select_from(requests).where(
                 requests.c.scope==self.db.settings.scope,requests.c.state=='RUNNING')):
                 raise InteractionError(BUSY)
-            if kind=='ANALYSIS':
-                count=s.scalar(select(func.count()).select_from(requests).where(
-                    requests.c.scope==self.db.settings.scope,requests.c.owner==user,requests.c.kind=='ANALYSIS'))
-                if count>=1:raise InteractionError(LIMIT)
-                if c['classification_status']!='READY' or self.store.profiles._pending(s,c['id']):
-                    raise InteractionError('Изчакайте подготовката на CPV кодовете за профила.')
+            if kind=='ANALYSIS' and (c['classification_status']!='READY' or self.store.profiles._pending(s,c['id'])):
+                raise InteractionError('Изчакайте подготовката на CPV кодовете за профила.')
             ident=uuid4()
             s.execute(insert(requests).values(id=ident,scope=self.db.settings.scope,owner=user,
                 owner_user_id=c['owner_user_id'],company=c['id'],kind=kind,request_hash=hashed,

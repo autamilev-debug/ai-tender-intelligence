@@ -70,7 +70,7 @@ jobs:
       - name: All real PostgreSQL integration tests
         run: |
           python -m pytest -q -m postgres --junitxml="$RUNNER_TEMP/postgres.xml"
-          python scripts/check_test_results.py "$RUNNER_TEMP/postgres.xml" --minimum 32
+          python scripts/check_test_results.py "$RUNNER_TEMP/postgres.xml" --minimum 36
       - name: Final publication check
         run: python scripts/check_public_tree.py --tracked
       - name: Build Docker image

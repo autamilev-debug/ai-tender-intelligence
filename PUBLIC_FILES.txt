@@ -15,6 +15,7 @@ document_migrations/env.py
 document_migrations/versions/e0001_documents.py
 extraction_migrations/env.py
 extraction_migrations/versions/x0001_extractions.py
+migrations/beta/0001_remove_lifetime_analysis_limit.sql
 migrations/env.py
 migrations/script.py.mako
 migrations/versions/0001_profiles.py
